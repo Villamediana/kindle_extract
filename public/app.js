@@ -264,7 +264,6 @@
     if (!b.hasFile) {
       renderReaderHead(b);
       $('#rNotExtracted').hidden = false;
-      $('#rWipeRow').hidden = true;
       $('#rContent').innerHTML = '';
       $('#rContent').hidden = true;
       $('#btnDownload').disabled = true;
@@ -283,7 +282,6 @@
     }
 
     $('#rNotExtracted').hidden = true;
-    $('#rWipeRow').hidden = false;
     $('#rContent').hidden = false;
     $('#btnDownload').disabled = false;
 
@@ -516,14 +514,11 @@
     );
   });
 
-  // ---- reset book (botões no leitor) ----
-  function wipeSelectedBook() {
+  $('#btnReset').addEventListener('click', () => {
     if (!state.selectedAsin) return;
     const b = state.books.find(x => x.asin === state.selectedAsin);
     if (b) confirmReset(b);
-  }
-  $('#btnReset').addEventListener('click', wipeSelectedBook);
-  $('#btnWipeBook').addEventListener('click', wipeSelectedBook);
+  });
 
   // ---- handlers ----
   $('#btnStart').addEventListener('click', async () => {

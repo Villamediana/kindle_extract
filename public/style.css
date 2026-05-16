@@ -489,22 +489,6 @@ code { font-size: 0.85em; padding: 1px 5px; background: var(--bg-3); border-radi
   margin-top: 4px;
 }
 
-.reader-wipe-row {
-  display: flex; align-items: center; gap: 12px;
-  margin: -8px 0 22px;
-  padding: 8px 4px;
-  flex-wrap: wrap;
-}
-.btn-link-danger {
-  color: var(--err);
-  font-size: 12px;
-  font-weight: 500;
-  padding: 4px 0;
-  letter-spacing: 0.2px;
-}
-.btn-link-danger:hover { text-decoration: underline; color: #ffb8b8; }
-.reader-wipe-hint { font-size: 11px; color: var(--text-3); }
-
 .not-extracted {
   background: var(--bg-card);
   border: 1px dashed var(--line-2);
