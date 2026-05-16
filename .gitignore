@@ -1,0 +1,11 @@
+node_modules/
+output/
+screenshots/
+session/
+debug/
+tmp_ocr/
+config.json
+cookies.json
+server.log
+.env
+*.log

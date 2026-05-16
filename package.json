@@ -1,0 +1,19 @@
+{
+  "name": "kindle_extract",
+  "version": "0.1.0",
+  "description": "Extrai texto de livros do Kindle Cloud Reader via automação de browser (cookies importados)",
+  "main": "src/extract.js",
+  "scripts": {
+    "setup": "node src/setup.js",
+    "start": "node src/setup.js && node src/server.js",
+    "import-cookies": "node src/login.js",
+    "list-library": "node src/list_library.js",
+    "extract": "node src/extract.js",
+    "server": "node src/server.js",
+    "install-browsers": "playwright install chromium"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "playwright": "^1.48.0"
+  }
+}

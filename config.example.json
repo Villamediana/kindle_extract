@@ -1,0 +1,13 @@
+{
+  "books": [
+    {
+      "asin": "B00XXXXXXX",
+      "title": "Nome do Livro"
+    }
+  ],
+  "settings": {
+    "pageDelayMs": 1500,
+    "screenshotEachPage": false,
+    "headless": true
+  }
+}
