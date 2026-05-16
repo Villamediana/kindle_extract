@@ -186,20 +186,64 @@ async function extractBook(context, book, settings, idx, total) {
 
   if (isResume && startFromPage > 0) {
     if (!JSON_EVENTS) process.stdout.write(`  avançando ${startFromPage} págs... `);
+    // Avanço mais lento — Kindle perde eventos com delays muito curtos em loops longos.
+    // Usa delay maior e verifica progresso periodicamente.
+    let lastCheckHash = '';
+    let stallCount = 0;
     for (let i = 0; i < startFromPage; i++) {
       await turnPage(page);
-      await page.waitForTimeout(120);
+      await page.waitForTimeout(400);
+
+      // a cada 25 viradas, confere se a página de fato mudou
+      if ((i + 1) % 25 === 0 || i === startFromPage - 1) {
+        await waitPageImageReady(page, 3000);
+        const probe = await capturePagePNG(page).catch(() => null);
+        const probeHash = probe ? hashB64(probe) : '';
+        if (probeHash && probeHash === lastCheckHash) {
+          stallCount++;
+          // página travou — espera mais um pouco antes de continuar
+          await page.waitForTimeout(1500);
+          if (stallCount >= 2) {
+            log(`  ⚠ avanço pode ter travado na pág ~${i + 1} — continuando mesmo assim`);
+          }
+        } else {
+          stallCount = 0;
+        }
+        lastCheckHash = probeHash;
+      }
     }
     if (!JSON_EVENTS) process.stdout.write('ok\n');
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(2500);
+
+    // Sanidade: confere se a página atual bate com o lastHash do state.
+    // Se bater, é sinal de que o avanço não pulou nada e estamos vendo a última pág extraída.
+    const savedHash = (state && state.lastHash) || '';
+    if (savedHash) {
+      const probe = await capturePagePNG(page).catch(() => null);
+      if (probe) {
+        const probeHash = hashB64(probe);
+        if (probeHash === savedHash) {
+          log(`  ⚠ avanço pode não ter progredido — primeira captura idêntica ao último hash salvo`);
+          for (let k = 0; k < 3; k++) {
+            await turnPage(page);
+            await page.waitForTimeout(800);
+          }
+        }
+      }
+    }
   }
 
   const out = fs.createWriteStream(outFile, { flags: isResume ? 'a' : 'w' });
 
   const maxPages = book.maxPages || 10000;
+  // Threshold de fim de livro: precisa de N capturas com mesmo hash pra considerar fim.
+  // Valor alto reduz falsos positivos (ex: render hiccup, página intermediária travada).
+  const END_OF_BOOK_THRESHOLD = 5;
   let currentPage = startFromPage;
   let totalChars = (state && state.totalChars) || 0;
-  let prevHash = (state && state.lastHash) || '';
+  // Não herda o lastHash do state ao retomar — evita falso positivo se a primeira
+  // captura pós-avanço bater com a última extraída antes.
+  let prevHash = '';
   let sameHashCount = 0;
   const startedAt = (state && state.startedAt) || new Date().toISOString();
   const tStart = Date.now();
@@ -256,26 +300,27 @@ async function extractBook(context, book, settings, idx, total) {
 
       const b64 = await capturePagePNG(page);
       if (!b64) {
-        // não conseguiu capturar — talvez não tenha mais conteúdo
         sameHashCount++;
-        if (sameHashCount >= 3) {
+        if (sameHashCount >= END_OF_BOOK_THRESHOLD) {
           completed = true;
-          abortReason = 'fim do livro (sem imagem nas últimas 3 tentativas)';
+          abortReason = `fim do livro (sem imagem em ${END_OF_BOOK_THRESHOLD} tentativas)`;
           break;
         }
         await turnPage(page);
+        await page.waitForTimeout(800);
         continue;
       }
 
       const hash = hashB64(b64);
       if (hash === prevHash) {
         sameHashCount++;
-        if (sameHashCount >= 2) {
+        if (sameHashCount >= END_OF_BOOK_THRESHOLD) {
           completed = true;
-          abortReason = 'fim do livro (2 imagens iguais)';
+          abortReason = `fim do livro (${END_OF_BOOK_THRESHOLD} imagens iguais)`;
           break;
         }
         await turnPage(page);
+        await page.waitForTimeout(800);
         continue;
       }
       sameHashCount = 0;
