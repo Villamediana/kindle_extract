@@ -462,22 +462,9 @@
     return parsed;
   }
 
-  $('#cookiesSave').addEventListener('click', async () => {
-    try {
-      const cookies = parseCookiesInput();
-      setCookieStatus('Salvando…', 'info');
-      const r = await api('/api/cookies', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(cookies)
-      });
-      setCookieStatus(`✓ ${r.count} cookies salvos. Cookies de sessão encontrados: <code>${r.sessionCookiesFound.join(', ')}</code>`, 'ok');
-      loadStatus();
-    } catch (e) {
-      setCookieStatus('✗ ' + e.message, 'err');
-    }
-  });
-
   $('#cookiesValidate').addEventListener('click', async () => {
+    const btn = $('#cookiesValidate');
+    btn.disabled = true;
     try {
       const cookies = parseCookiesInput();
       setCookieStatus('<span class="loader"></span> Salvando cookies…', 'info');
@@ -492,12 +479,13 @@
         loadStatus();
         return;
       }
-      // Login OK — auto-scan da biblioteca (~30-60s)
       state.scanActive = true;
       setCookieStatus('<span class="loader"></span> Login OK — listando biblioteca (pode levar até 1 min)…', 'info');
       try {
         const scan = await api('/api/scan-library', { method: 'POST' });
-        setCookieStatus(`✓ Pronto! <b>${scan.total}</b> livros importados (${scan.added} novos). Você já pode fechar.`, 'ok');
+        setCookieStatus(`✓ Pronto! ${scan.total} livros importados (${scan.added} novos).`, 'ok');
+        toast(`${scan.total} livros importados`);
+        setTimeout(() => closeModal('cookiesModal'), 1500);
       } catch (e) {
         setCookieStatus(`✗ Login OK mas falhou ao listar livros: ${e.message}`, 'err');
       } finally {
@@ -507,6 +495,8 @@
     } catch (e) {
       state.scanActive = false;
       setCookieStatus('✗ ' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
     }
   });
 
