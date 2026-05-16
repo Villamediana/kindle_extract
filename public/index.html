@@ -176,10 +176,11 @@
         </div>
         <article id="readerBody" class="reader" hidden>
           <header class="reader-head">
-            <div>
-              <div class="reader-eyebrow" id="rEyebrow">—</div>
+            <div class="reader-head-text">
+              <div class="reader-eyebrow"><span id="rBadge" class="badge">—</span></div>
               <h1 id="rTitle">—</h1>
-              <div class="reader-meta" id="rMeta">—</div>
+              <div class="reader-author" id="rAuthor">—</div>
+              <div class="reader-asin" id="rAsin">—</div>
             </div>
             <div class="reader-tools">
               <button id="btnFontMinus" class="ctl" title="Diminuir fonte">A-</button>
@@ -188,6 +189,11 @@
               <button id="btnReset" class="ctl ctl-danger" title="Apagar e refazer extração">⟳</button>
             </div>
           </header>
+          <div class="reader-stats" id="rStats"></div>
+          <div id="rNotExtracted" class="not-extracted" hidden>
+            <p>Este livro ainda não foi extraído.</p>
+            <button id="btnExtractThis" class="btn btn-primary">Extrair só este livro</button>
+          </div>
           <div id="rContent" class="reader-content">—</div>
         </article>
       </div>

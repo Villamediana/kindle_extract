@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { spawn, spawnSync } = require('child_process');
 const readline = require('readline');
+const { scanLibrary, mergeIntoConfig, normalizeCookie: libNormalizeCookie } = require('./library');
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -247,19 +248,7 @@ app.get('/api/events', (req, res) => {
 // ----- Cookies + login check -----
 
 function normalizeCookie(c) {
-  const out = {
-    name: c.name, value: c.value, domain: c.domain,
-    path: c.path || '/', httpOnly: !!c.httpOnly, secure: !!c.secure
-  };
-  if (c.expirationDate) out.expires = Math.floor(Number(c.expirationDate));
-  else if (c.expires && typeof c.expires === 'number') out.expires = Math.floor(c.expires);
-  let ss = (c.sameSite || '').toString().toLowerCase();
-  if (ss === 'no_restriction' || ss === 'none' || ss === 'unspecified') ss = 'None';
-  else if (ss === 'lax') ss = 'Lax';
-  else if (ss === 'strict') ss = 'Strict';
-  else ss = 'Lax';
-  out.sameSite = ss;
-  return out;
+  return libNormalizeCookie(c);
 }
 
 app.post('/api/cookies', (req, res) => {
@@ -345,6 +334,40 @@ app.post('/api/check-login', async (req, res) => {
   } catch (e) {
     try { if (browser) await browser.close(); } catch {}
     res.status(500).json({ error: e.message });
+  }
+});
+
+let scanRunning = false;
+
+app.post('/api/scan-library', async (req, res) => {
+  if (scanRunning) return res.status(409).json({ error: 'scan já em andamento' });
+  if (!fs.existsSync(COOKIES_PATH)) {
+    return res.status(400).json({ error: 'cookies.json não existe — cole os cookies primeiro' });
+  }
+  scanRunning = true;
+  broadcast({ t: Date.now(), type: 'scan_progress', phase: 'starting', msg: 'Iniciando varredura da biblioteca' });
+  try {
+    const books = await scanLibrary({
+      headless: true,
+      onProgress: (p) => {
+        broadcast({ t: Date.now(), type: 'scan_progress', ...p });
+      }
+    });
+    if (books.length === 0) {
+      broadcast({ t: Date.now(), type: 'scan_progress', phase: 'empty', msg: 'Nenhum livro encontrado' });
+      return res.status(404).json({ error: 'nenhum livro encontrado na biblioteca' });
+    }
+    const merged = mergeIntoConfig(books);
+    broadcast({
+      t: Date.now(), type: 'scan_done',
+      total: merged.total, added: merged.added, scanned: merged.scanned
+    });
+    res.json({ ok: true, ...merged });
+  } catch (e) {
+    broadcast({ t: Date.now(), type: 'scan_progress', phase: 'error', msg: e.message });
+    res.status(500).json({ error: e.message });
+  } finally {
+    scanRunning = false;
   }
 });
 

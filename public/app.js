@@ -31,6 +31,21 @@
     const d = new Date(ts);
     return d.toTimeString().slice(0, 8);
   }
+  function fmtRel(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (Number.isNaN(+d)) return '—';
+    const diff = (Date.now() - d.getTime()) / 1000;
+    if (diff < 60) return 'agora há pouco';
+    if (diff < 3600) return `há ${Math.floor(diff/60)} min`;
+    if (diff < 86400) return `há ${Math.floor(diff/3600)} h`;
+    if (diff < 86400 * 7) return `há ${Math.floor(diff/86400)} dias`;
+    return d.toLocaleDateString('pt-BR');
+  }
+  function countWords(text) {
+    if (!text) return 0;
+    return (text.trim().match(/\S+/g) || []).length;
+  }
 
   function toast(msg, type='info') {
     const el = $('#toast');
@@ -198,34 +213,84 @@
   function selectBook(asin) {
     state.selectedAsin = asin;
     renderBookList();
-    if (state.activeTab === 'reader') loadReader(asin);
-    else {
-      // hint: switch to reader if has file
-      const b = state.books.find(x => x.asin === asin);
-      if (b && b.hasFile) {
-        switchTab('reader');
-        loadReader(asin);
-      }
+    switchTab('reader');
+    loadReader(asin);
+  }
+
+  function statPill(label, val, mono = false) {
+    return `<div class="stat-pill">
+      <div class="stat-pill-val${mono ? ' mono' : ''}">${escapeHtml(val)}</div>
+      <div class="stat-pill-label">${escapeHtml(label)}</div>
+    </div>`;
+  }
+
+  function renderReaderHead(b, extra = {}) {
+    const isCompleted = b.status === 'completed';
+    const isPartial = b.status === 'partial' || b.status === 'extracting';
+    const isExtracting = b.status === 'extracting';
+    const badgeClass = isCompleted ? 'badge ok' : isPartial ? 'badge warn' : 'badge';
+    const badgeLabel = isExtracting ? 'Extraindo agora' :
+                       isCompleted ? 'Completo' :
+                       isPartial ? 'Parcial' : 'Não extraído';
+    $('#rBadge').className = badgeClass;
+    $('#rBadge').textContent = badgeLabel;
+    $('#rTitle').textContent = b.title;
+    $('#rAuthor').textContent = b.author ? `por ${b.author}` : '';
+    $('#rAuthor').hidden = !b.author;
+    $('#rAsin').textContent = `ASIN ${b.asin}`;
+
+    const pages = b.state?.lastPage || 0;
+    const totalChars = b.state?.totalChars || extra.size || 0;
+    const updatedAt = b.state?.updatedAt;
+    const words = extra.words;
+
+    const pills = [];
+    if (pages > 0) pills.push(statPill('páginas', fmtNum(pages)));
+    if (words != null) pills.push(statPill('palavras', fmtNum(words)));
+    if (totalChars > 0) pills.push(statPill('tamanho', fmtBytes(totalChars)));
+    if (updatedAt) pills.push(statPill('atualizado', fmtRel(updatedAt)));
+    if (b.state?.abortReason && !isCompleted) {
+      pills.push(statPill('última parada', b.state.abortReason));
     }
+    $('#rStats').innerHTML = pills.join('');
+    $('#rStats').hidden = pills.length === 0;
   }
 
   async function loadReader(asin) {
     const b = state.books.find(x => x.asin === asin);
     if (!b) return;
+
+    $('#readerEmpty').hidden = true;
+    $('#readerBody').hidden = false;
+
     if (!b.hasFile) {
-      $('#readerEmpty').hidden = false;
-      $('#readerBody').hidden = true;
-      $('#readerEmpty').querySelector('.empty-title').textContent = 'Este livro ainda não foi extraído';
-      $('#readerEmpty').querySelector('.empty-sub').textContent = 'Inicie a extração para gerar o texto.';
+      renderReaderHead(b);
+      $('#rNotExtracted').hidden = false;
+      $('#rContent').innerHTML = '';
+      $('#rContent').hidden = true;
+      $('#btnDownload').disabled = true;
+      $('#btnExtractThis').onclick = async () => {
+        try {
+          await api('/api/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ asins: [b.asin] })
+          });
+          toast(`Extraindo "${b.title}"…`);
+          switchTab('live');
+        } catch (e) { toast('Erro: ' + e.message, 'err'); }
+      };
       return;
     }
+
+    $('#rNotExtracted').hidden = true;
+    $('#rContent').hidden = false;
+    $('#btnDownload').disabled = false;
+
     try {
       const data = await api(`/api/file/${encodeURIComponent(b.fileName)}`);
-      $('#readerEmpty').hidden = true;
-      $('#readerBody').hidden = false;
-      $('#rEyebrow').textContent = b.status === 'completed' ? 'Livro completo' : 'Extração parcial';
-      $('#rTitle').textContent = b.title;
-      $('#rMeta').textContent = `${b.author || '—'} · ${fmtBytes(data.size)} · ${fmtNum((data.content.match(/\s+/g)||[]).length)} palavras`;
+      const words = countWords(data.content);
+      renderReaderHead(b, { size: data.size, words });
       const html = data.content
         .split(/\n\n+/)
         .filter(p => p.trim())
@@ -297,6 +362,23 @@
     } else if (ev.type === 'snapshot') {
       state.running = ev.running;
       if (ev.current) state.current = ev.current;
+    } else if (ev.type === 'scan_progress') {
+      if (state.scanActive) {
+        let msg;
+        if (ev.phase === 'starting') msg = 'iniciando…';
+        else if (ev.phase === 'opening') msg = 'abrindo biblioteca…';
+        else if (ev.phase === 'collecting') msg = 'coletando títulos…';
+        else if (ev.phase === 'scrolling') msg = `rolando — ${ev.count || 0} livros encontrados`;
+        else if (ev.phase === 'done') msg = `varredura completa: ${ev.count} livros`;
+        else if (ev.phase === 'empty') msg = 'nenhum livro encontrado';
+        else if (ev.phase === 'error') msg = `erro: ${ev.msg}`;
+        else msg = ev.phase;
+        setCookieStatus(`<span class="loader"></span> ${escapeHtml(msg)}`, 'info');
+      }
+    } else if (ev.type === 'scan_done') {
+      if (state.scanActive) {
+        setCookieStatus(`✓ ${ev.total} livros no config.json (${ev.added} novos).`, 'ok');
+      }
     }
   }
 
@@ -400,19 +482,32 @@
   $('#cookiesValidate').addEventListener('click', async () => {
     try {
       const cookies = parseCookiesInput();
-      setCookieStatus('Salvando e testando login (pode levar 10s)…', 'info');
+      setCookieStatus('<span class="loader"></span> Salvando cookies…', 'info');
       await api('/api/cookies', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(cookies)
       });
+      setCookieStatus('<span class="loader"></span> Testando login (pode levar 10s)…', 'info');
       const r = await api('/api/check-login', { method: 'POST' });
-      if (r.ok) {
-        setCookieStatus(`✓ Login OK! Livros detectados na biblioteca: <b>${r.booksDetected || '?'}</b>. URL: <code>${r.url}</code>`, 'ok');
-      } else {
-        setCookieStatus(`✗ ${r.error || 'falhou'}. URL final: <code>${r.url}</code>`, 'err');
+      if (!r.ok) {
+        setCookieStatus(`✗ ${r.error || 'falhou'}. URL final: <code>${escapeHtml(r.url || '')}</code>`, 'err');
+        loadStatus();
+        return;
+      }
+      // Login OK — auto-scan da biblioteca (~30-60s)
+      state.scanActive = true;
+      setCookieStatus('<span class="loader"></span> Login OK — listando biblioteca (pode levar até 1 min)…', 'info');
+      try {
+        const scan = await api('/api/scan-library', { method: 'POST' });
+        setCookieStatus(`✓ Pronto! <b>${scan.total}</b> livros importados (${scan.added} novos). Você já pode fechar.`, 'ok');
+      } catch (e) {
+        setCookieStatus(`✗ Login OK mas falhou ao listar livros: ${e.message}`, 'err');
+      } finally {
+        state.scanActive = false;
       }
       loadStatus();
     } catch (e) {
+      state.scanActive = false;
       setCookieStatus('✗ ' + e.message, 'err');
     }
   });

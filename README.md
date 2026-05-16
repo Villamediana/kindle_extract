@@ -61,30 +61,37 @@ No primeiro `apt-get` ele pede `sudo`.
 
 ---
 
-## Autenticação (cookies)
+## Autenticação + biblioteca (um passo só)
 
-A Amazon não tem login por API, então autenticamos importando os cookies do seu browser pessoal:
+A Amazon não tem login por API, então autenticamos importando os cookies do seu browser pessoal. E como bônus, **ao validar os cookies o sistema já lista toda a sua biblioteca automaticamente** e popula o `config.json` — você não precisa editar nada à mão.
 
 1. No seu PC, instale [Cookie-Editor](https://chromewebstore.google.com/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm) (Chrome/Brave/Edge).
 2. Faça login normal em **read.amazon.com**.
 3. Ícone da extensão → **Export → Export as JSON**.
 4. No dashboard (`http://SEU_SERVIDOR:3400`), clique em **Cookies** → cole o JSON → **Validar & testar login**.
 
-O sistema valida o JSON, confere a presença dos cookies obrigatórios (`at-main`, `sess-at-main`, `x-main`, `ubid-main`, `session-id`), salva em `cookies.json` e abre o Kindle uma vez pra confirmar que a sessão está válida.
+Em um único clique o sistema:
 
-> A sessão da Amazon expira a cada poucas semanas. Quando acontecer, basta repetir o passo 4.
+- Salva o JSON em `cookies.json`
+- Confere os cookies de sessão obrigatórios (`at-main`, `sess-at-main`, `x-main`, `ubid-main`, `session-id`)
+- Abre o Kindle headless e verifica que a sessão está válida
+- **Varre a biblioteca inteira com scroll incremental e escreve todos os livros em `config.json`** (preservando `settings` e qualquer `maxPages` que você já tinha definido)
+
+O progresso aparece em tempo real no próprio modal. Demora uns 30-60s dependendo do tamanho da biblioteca.
+
+> A sessão da Amazon expira a cada poucas semanas. Quando acontecer, basta repetir o passo 4 — ele também revarre a biblioteca, então livros novos comprados nesse intervalo aparecem sozinhos.
 
 ---
 
-## Lista de livros
+## Editando a lista (opcional)
 
-Edite `config.json` (use `config.example.json` como base):
+O `config.json` é gerado automaticamente pelo passo acima, mas você pode editá-lo à mão se quiser:
 
 ```json
 {
   "books": [
     { "asin": "B0752X3H64", "title": "Cartas de um diabo a seu aprendiz", "author": "Lewis, C. S." },
-    { "asin": "B07V8LHWZ5", "title": "Hábitos Atômicos", "author": "Clear, James" }
+    { "asin": "B07V8LHWZ5", "title": "Hábitos Atômicos", "author": "Clear, James", "maxPages": 50 }
   ],
   "settings": {
     "pageDelayMs": 1500,
@@ -93,9 +100,9 @@ Edite `config.json` (use `config.example.json` como base):
 }
 ```
 
-O ASIN está na URL ao abrir o livro em `read.amazon.com` (`?asin=BXXXXXXX`). Ou rode `npm run list-library` que lista tudo automaticamente.
+Campo opcional por livro: `maxPages` (limita páginas — útil pra testar). Esse campo é preservado entre varreduras.
 
-Campo opcional por livro: `maxPages` (limita páginas — útil pra testar).
+Se você quiser refazer a varredura via CLI sem passar pelo UI, tem `npm run list-library`.
 
 ---
 
@@ -114,7 +121,7 @@ Abra `http://SEU_SERVIDOR:3400`:
 - **Topo** — contadores (livros, prontos, parciais, status dos cookies), iniciar/parar
 - **Sidebar** — biblioteca com busca, filtros, bolinhas de status, reset por livro no hover
 - **Ao vivo** — livro atual, página, caracteres extraídos, preview do texto saindo agora, tail do `.txt` se atualizando
-- **Leitor** — lê o `.txt` com tipografia serif, tamanho ajustável, download
+- **Leitor** — clica num livro qualquer e vê título, autor, ASIN, número de páginas extraídas, palavras, tamanho, última atualização e status. Se ainda não foi extraído, dá pra disparar a extração só dele direto desse card. Tipografia serif, tamanho ajustável, download
 - **Logs** — stream colorido de eventos via SSE
 
 ### Pela CLI
@@ -139,6 +146,7 @@ npm run extract
 | POST   | `/api/stop`                   | para a extração atual                                    |
 | POST   | `/api/cookies`                | salva cookies (body = array JSON da extensão)            |
 | POST   | `/api/check-login`            | abre Kindle e valida que está logado                     |
+| POST   | `/api/scan-library`           | varre biblioteca + mescla no `config.json` (emite `scan_progress` no SSE) |
 | POST   | `/api/book/:asin/reset`       | apaga `.txt` + state do livro                            |
 
 ---
@@ -153,7 +161,8 @@ kindle_extract/
 │   ├── extract.js           Playwright + Tesseract (pipeline async)
 │   ├── setup.js             health-check / installer
 │   ├── login.js             validação de cookies via CLI
-│   ├── list_library.js      lista os livros disponíveis
+│   ├── library.js           módulo: scan da biblioteca + merge no config
+│   ├── list_library.js      wrapper CLI do library.js
 │   ├── clean.js             normalização pós-OCR
 │   └── inspect_reader.js    debug: dumpa HTML/screenshots do reader
 ├── output/                  .txt + .state.json (gitignored)
