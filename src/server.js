@@ -82,7 +82,13 @@ function cookiesPresent() {
 
 app.get('/api/status', (req, res) => {
   const config = loadConfig();
-  if (!config) return res.status(400).json({ error: 'config.json não encontrado' });
+  if (!config) {
+    return res.json({
+      running: false, startedAt: null, endedAt: null, current: null,
+      cookiesPresent: cookiesPresent(),
+      settings: {}, books: []
+    });
+  }
 
   const books = config.books.map((b, i) => {
     const info = loadStateFor(b);
@@ -335,6 +341,40 @@ app.post('/api/check-login', async (req, res) => {
     try { if (browser) await browser.close(); } catch {}
     res.status(500).json({ error: e.message });
   }
+});
+
+function rmIfExists(p) {
+  if (!fs.existsSync(p)) return false;
+  try {
+    fs.rmSync(p, { recursive: true, force: true });
+    return true;
+  } catch { return false; }
+}
+
+app.post('/api/wipe', (req, res) => {
+  if (runState.running) {
+    return res.status(409).json({ error: 'pare a extração antes de apagar tudo' });
+  }
+  const removed = [];
+  const targets = [
+    { name: 'cookies.json', path: COOKIES_PATH },
+    { name: 'config.json', path: CONFIG_PATH },
+    { name: '.config.run.json', path: path.join(ROOT, '.config.run.json') },
+    { name: 'output/', path: OUTPUT_DIR },
+    { name: 'tmp_ocr/', path: path.join(ROOT, 'tmp_ocr') },
+    { name: 'session/', path: SESSION_DIR },
+    { name: 'screenshots/', path: path.join(ROOT, 'screenshots') }
+  ];
+  for (const t of targets) {
+    if (rmIfExists(t.path)) removed.push(t.name);
+  }
+  // recria dirs vazios pra evitar problemas em runs futuros
+  for (const d of [OUTPUT_DIR, path.join(ROOT, 'tmp_ocr')]) {
+    try { fs.mkdirSync(d, { recursive: true }); } catch {}
+  }
+  logBuffer = [];
+  broadcast({ t: Date.now(), type: 'system', msg: `Wipe: ${removed.join(', ') || 'nada removido'}` });
+  res.json({ ok: true, removed });
 });
 
 let scanRunning = false;

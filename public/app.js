@@ -500,6 +500,27 @@
     }
   });
 
+  $('#btnWipeAll').addEventListener('click', () => {
+    confirmDialog(
+      'Apagar tudo?',
+      'Isso remove cookies, lista de livros, todos os textos já extraídos, screenshots e a sessão do Chromium. Não dá pra desfazer. Continuar?',
+      async () => {
+        try {
+          const r = await api('/api/wipe', { method: 'POST' });
+          toast(`Apagado: ${r.removed.join(', ') || 'nada'}`);
+          $('#cookiesInput').value = '';
+          setCookieStatus('', 'info');
+          $('#cookiesStatus').className = 'modal-status';
+          closeModal('cookiesModal');
+          state.selectedAsin = null;
+          $('#readerEmpty').hidden = false;
+          $('#readerBody').hidden = true;
+          await loadStatus();
+        } catch (e) { toast('Erro: ' + e.message, 'err'); }
+      }
+    );
+  });
+
   // ---- reset book (botão no leitor) ----
   $('#btnReset').addEventListener('click', () => {
     if (!state.selectedAsin) return;
