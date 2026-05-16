@@ -241,14 +241,12 @@
 
     const pages = b.state?.lastPage || 0;
     const totalChars = b.state?.totalChars || extra.size || 0;
-    const updatedAt = b.state?.updatedAt;
     const words = extra.words;
 
     const pills = [];
     if (pages > 0) pills.push(statPill('páginas', fmtNum(pages)));
     if (words != null) pills.push(statPill('palavras', fmtNum(words)));
     if (totalChars > 0) pills.push(statPill('tamanho', fmtBytes(totalChars)));
-    if (updatedAt) pills.push(statPill('atualizado', fmtRel(updatedAt)));
     if (b.state?.abortReason && !isCompleted) {
       pills.push(statPill('última parada', b.state.abortReason));
     }
