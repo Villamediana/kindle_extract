@@ -507,9 +507,6 @@
           const r = await api('/api/wipe', { method: 'POST' });
           toast(`Apagado: ${r.removed.join(', ') || 'nada'}`);
           $('#cookiesInput').value = '';
-          setCookieStatus('', 'info');
-          $('#cookiesStatus').className = 'modal-status';
-          closeModal('cookiesModal');
           state.selectedAsin = null;
           $('#readerEmpty').hidden = false;
           $('#readerBody').hidden = true;

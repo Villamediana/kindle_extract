@@ -38,6 +38,12 @@
         </svg>
         Cookies
       </button>
+      <button id="btnWipeAll" class="btn btn-danger-ghost" title="Apagar tudo: cookies, lista de livros, textos extraídos e sessão">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13M10 11v6M14 11v6"/>
+        </svg>
+        Apagar tudo
+      </button>
       <button id="btnStart" class="btn btn-primary">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
         Iniciar extração
@@ -66,16 +72,6 @@
         </ol>
         <textarea id="cookiesInput" placeholder='[{"domain": ".amazon.com", "name": "at-main", "value": "..."}, ...]' rows="10"></textarea>
         <div id="cookiesStatus" class="modal-status"></div>
-
-        <div class="danger-zone">
-          <div class="danger-zone-head">Zona de perigo</div>
-          <div class="danger-zone-body">
-            <div class="danger-zone-text">
-              Apaga <b>tudo</b>: cookies, lista de livros, textos extraídos, screenshots e sessão do Chromium. Útil pra recomeçar do zero.
-            </div>
-            <button id="btnWipeAll" class="btn btn-danger">Apagar tudo</button>
-          </div>
-        </div>
       </div>
       <footer class="modal-foot">
         <button id="cookiesValidate" class="btn btn-primary">Validar &amp; importar biblioteca</button>
