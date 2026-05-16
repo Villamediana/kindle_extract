@@ -72,6 +72,42 @@ async function turnPage(page) {
   await page.keyboard.press('ArrowRight');
 }
 
+async function turnPageBack(page) {
+  await page.keyboard.press('ArrowLeft');
+}
+
+// Kindle Cloud Reader abre o livro na última posição lida pelo usuário, não na pág 1.
+// Esta função força o reader a voltar até o início (detectado quando o hash da imagem
+// para de mudar — i.e., ArrowLeft em loop não muda mais a página).
+async function goToStart(page) {
+  // Tenta atalho Home primeiro (alguns clients aceitam)
+  await page.keyboard.press('Home').catch(() => {});
+  await page.waitForTimeout(1500);
+
+  let prevHash = '';
+  let stable = 0;
+  let i;
+  for (i = 0; i < 2000; i++) {
+    await turnPageBack(page);
+    await page.waitForTimeout(180);
+
+    if (i % 15 === 14) {
+      await page.waitForTimeout(300);
+      const probe = await capturePagePNG(page).catch(() => null);
+      const h = probe ? hashB64(probe) : '';
+      if (h && h === prevHash) {
+        stable++;
+        if (stable >= 2) break;
+      } else {
+        stable = 0;
+        prevHash = h;
+      }
+    }
+  }
+  await page.waitForTimeout(1500);
+  return i + 1;
+}
+
 function loadState(stateFile) {
   if (!fs.existsSync(stateFile)) return null;
   try { return JSON.parse(fs.readFileSync(stateFile, 'utf-8')); }
@@ -183,6 +219,12 @@ async function extractBook(context, book, settings, idx, total) {
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(7000);
   await page.click('body').catch(() => {});
+
+  // O Kindle abre o livro na última posição lida pelo usuário — força o início.
+  if (!JSON_EVENTS) process.stdout.write(`  ⮜ voltando ao início... `);
+  const backTurns = await goToStart(page);
+  if (!JSON_EVENTS) process.stdout.write(`ok (${backTurns} viradas)\n`);
+  emit('book_rewind', { asin: book.asin, backTurns });
 
   if (isResume && startFromPage > 0) {
     if (!JSON_EVENTS) process.stdout.write(`  avançando ${startFromPage} págs... `);
