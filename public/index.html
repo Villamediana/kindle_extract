@@ -195,10 +195,14 @@
               <button id="btnFontMinus" class="ctl" title="Diminuir fonte">A-</button>
               <button id="btnFontPlus" class="ctl" title="Aumentar fonte">A+</button>
               <button id="btnDownload" class="ctl" title="Baixar .txt">⬇</button>
-              <button id="btnReset" class="ctl ctl-danger" title="Apagar e refazer extração">⟳</button>
+              <button id="btnReset" class="ctl ctl-danger" title="Apagar conteúdo extraído (volta a não-extraído)">⌫</button>
             </div>
           </header>
           <div class="reader-stats" id="rStats"></div>
+          <div id="rWipeRow" class="reader-wipe-row" hidden>
+            <button id="btnWipeBook" class="btn-link-danger">⌫ Apagar conteúdo extraído</button>
+            <span class="reader-wipe-hint">livro volta a aparecer como “não extraído”, sem iniciar nova extração</span>
+          </div>
           <div id="rNotExtracted" class="not-extracted" hidden>
             <p>Este livro ainda não foi extraído.</p>
             <button id="btnExtractThis" class="btn btn-primary">Extrair só este livro</button>

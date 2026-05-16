@@ -264,6 +264,7 @@
     if (!b.hasFile) {
       renderReaderHead(b);
       $('#rNotExtracted').hidden = false;
+      $('#rWipeRow').hidden = true;
       $('#rContent').innerHTML = '';
       $('#rContent').hidden = true;
       $('#btnDownload').disabled = true;
@@ -282,6 +283,7 @@
     }
 
     $('#rNotExtracted').hidden = true;
+    $('#rWipeRow').hidden = false;
     $('#rContent').hidden = false;
     $('#btnDownload').disabled = false;
 
@@ -418,18 +420,14 @@
 
   async function confirmReset(book) {
     confirmDialog(
-      'Apagar progresso?',
-      `Apagar a extração de "${book.title}"? Isso remove o .txt e o estado salvo. A próxima extração começa do zero.`,
+      'Apagar conteúdo extraído?',
+      `Remove o .txt e o estado salvo de "${book.title}". O livro volta a aparecer como "não extraído" — nada começa automaticamente, você decide quando extrair de novo.`,
       async () => {
         try {
           const r = await api(`/api/book/${book.asin}/reset`, { method: 'POST' });
           toast(`Removido: ${r.removed.join(', ') || '(nada)'}`);
-          if (state.selectedAsin === book.asin) {
-            $('#readerEmpty').hidden = false;
-            $('#readerBody').hidden = true;
-            state.selectedAsin = null;
-          }
           await loadStatus();
+          if (state.selectedAsin === book.asin) loadReader(book.asin);
         } catch (e) { toast('Erro: ' + e.message, 'err'); }
       }
     );
@@ -521,12 +519,14 @@
     );
   });
 
-  // ---- reset book (botão no leitor) ----
-  $('#btnReset').addEventListener('click', () => {
+  // ---- reset book (botões no leitor) ----
+  function wipeSelectedBook() {
     if (!state.selectedAsin) return;
     const b = state.books.find(x => x.asin === state.selectedAsin);
     if (b) confirmReset(b);
-  });
+  }
+  $('#btnReset').addEventListener('click', wipeSelectedBook);
+  $('#btnWipeBook').addEventListener('click', wipeSelectedBook);
 
   // ---- handlers ----
   $('#btnStart').addEventListener('click', async () => {
