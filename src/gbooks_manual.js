@@ -359,8 +359,14 @@ async function captureCurrent({ broadcast, settings = {} }) {
       if (!b64) {
         sameHashCount++;
         if (sameHashCount >= END_OF_BOOK_THRESHOLD) {
-          completed = true;
-          abortReason = `fim do livro (${END_OF_BOOK_THRESHOLD} screenshots vazios)`;
+          const startPg = isResume ? prevState.lastPage : 0;
+          if (currentPage - startPg === 0) {
+            completed = false;
+            abortReason = 'tela parada — 0 págs extraídas nessa sessão';
+          } else {
+            completed = true;
+            abortReason = `fim do livro (${END_OF_BOOK_THRESHOLD} screenshots vazios)`;
+          }
           break;
         }
         await page.keyboard.press('ArrowRight');
@@ -372,8 +378,14 @@ async function captureCurrent({ broadcast, settings = {} }) {
       if (hash === prevHash) {
         sameHashCount++;
         if (sameHashCount >= END_OF_BOOK_THRESHOLD) {
-          completed = true;
-          abortReason = `fim do livro (${END_OF_BOOK_THRESHOLD} imagens iguais)`;
+          const startPg = isResume ? prevState.lastPage : 0;
+          if (currentPage - startPg === 0) {
+            completed = false;
+            abortReason = 'tela parada — 0 págs extraídas nessa sessão';
+          } else {
+            completed = true;
+            abortReason = `fim do livro (${END_OF_BOOK_THRESHOLD} imagens iguais)`;
+          }
           break;
         }
         await page.keyboard.press('ArrowRight');
@@ -635,8 +647,14 @@ async function runCaptureLoop(page, { bookId, title, broadcast, settings = {}, p
       if (!b64) {
         sameHashCount++;
         if (sameHashCount >= END_OF_BOOK_THRESHOLD) {
-          completed = true;
-          abortReason = `fim (${END_OF_BOOK_THRESHOLD} screenshots vazios)`;
+          const startPg = isResume ? prevState.lastPage : 0;
+          if (currentPage - startPg === 0) {
+            completed = false;
+            abortReason = 'tela parada — 0 págs extraídas nessa sessão';
+          } else {
+            completed = true;
+            abortReason = `fim (${END_OF_BOOK_THRESHOLD} screenshots vazios)`;
+          }
           break;
         }
         await page.keyboard.press('ArrowRight');
@@ -648,8 +666,14 @@ async function runCaptureLoop(page, { bookId, title, broadcast, settings = {}, p
       if (hash === prevHash) {
         sameHashCount++;
         if (sameHashCount >= END_OF_BOOK_THRESHOLD) {
-          completed = true;
-          abortReason = `fim do livro (${END_OF_BOOK_THRESHOLD} imagens iguais)`;
+          const startPg = isResume ? prevState.lastPage : 0;
+          if (currentPage - startPg === 0) {
+            completed = false;
+            abortReason = 'tela parada — 0 págs extraídas nessa sessão';
+          } else {
+            completed = true;
+            abortReason = `fim do livro (${END_OF_BOOK_THRESHOLD} imagens iguais)`;
+          }
           break;
         }
         await page.keyboard.press('ArrowRight');
@@ -775,6 +799,21 @@ async function captureAll({ broadcast, settings = {}, skipCompleted = true } = {
         const fileBase = safeFileName(book.title || book.id);
         const stateFile = path.join(OUTPUT_DIR, `${fileBase}.state.json`);
         const prevState = loadStateFile(stateFile);
+
+        // Se é retomada (livro parcial), avança até onde paramos antes de
+        // iniciar a captura — goToBookStart deixou na pág 1.
+        if (prevState && prevState.lastPage > 0 && !prevState.completed) {
+          broadcast?.({
+            t: Date.now(), type: 'gbooks_manual',
+            msg: `↻ avançando ${prevState.lastPage} págs (retomada)...`
+          });
+          for (let j = 0; j < prevState.lastPage; j++) {
+            if (abortRequested) break;
+            await page.keyboard.press('ArrowRight');
+            await page.waitForTimeout(220);
+          }
+          await page.waitForTimeout(2500);
+        }
 
         await runCaptureLoop(page, {
           bookId: book.id,
