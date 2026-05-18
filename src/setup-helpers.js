@@ -82,8 +82,20 @@ function probeTesseractLangs(cmd) {
   }
 }
 
+function playwrightBrowsersDir() {
+  if (process.env.PLAYWRIGHT_BROWSERS_PATH) return process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (process.platform === 'win32') {
+    const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+    return path.join(local, 'ms-playwright');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Caches', 'ms-playwright');
+  }
+  return path.join(os.homedir(), '.cache', 'ms-playwright');
+}
+
 function hasChromium() {
-  const cacheDir = path.join(process.env.HOME || os.homedir(), '.cache', 'ms-playwright');
+  const cacheDir = playwrightBrowsersDir();
   try {
     if (!fs.existsSync(cacheDir)) return false;
     return fs.readdirSync(cacheDir).some(d => d.startsWith('chromium'));
@@ -193,6 +205,7 @@ module.exports = {
   resolveTesseractCmd,
   probeTesseract,
   probeTesseractLangs,
+  playwrightBrowsersDir,
   hasChromium,
   hasPlaywright,
   instructionsFor

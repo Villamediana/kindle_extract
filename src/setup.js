@@ -15,7 +15,7 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { resolveTesseractCmd, platform: hostPlatform } = require('./setup-helpers');
+const { resolveTesseractCmd, platform: hostPlatform, playwrightBrowsersDir } = require('./setup-helpers');
 
 const ROOT = path.join(__dirname, '..');
 const COOKIES_PATH = path.join(ROOT, 'cookies.json');
@@ -74,7 +74,7 @@ if (needsInstall) {
 
 // ---------- 3. Playwright Chromium ----------
 step('Verificando Chromium do Playwright');
-const cacheDir = path.join(process.env.HOME || os.homedir(), '.cache', 'ms-playwright');
+const cacheDir = playwrightBrowsersDir();
 let hasChromium = false;
 try {
   if (fs.existsSync(cacheDir)) {
