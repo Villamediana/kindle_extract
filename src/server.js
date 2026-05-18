@@ -554,7 +554,20 @@ function runInstall(res, channel, cmd, args, opts = {}) {
   }
   installInFlight = true;
   broadcast({ t: Date.now(), type: channel, msg: `$ ${cmd} ${args.join(' ')}`, start: true });
-  const child = spawn(cmd, args, { cwd: ROOT, env: process.env, ...opts });
+  // No Windows, spawn de .cmd/.bat (npm, npx) precisa de shell: true desde a
+  // mitigação do CVE-2024-27980 — caso contrário falha com EINVAL.
+  const spawnOpts = { cwd: ROOT, env: process.env, ...opts };
+  if (process.platform === 'win32' && spawnOpts.shell === undefined) {
+    spawnOpts.shell = true;
+  }
+  let child;
+  try {
+    child = spawn(cmd, args, spawnOpts);
+  } catch (e) {
+    installInFlight = false;
+    broadcast({ t: Date.now(), type: channel, msg: `erro: ${e.message}`, err: true, end: true });
+    return res.status(500).json({ ok: false, error: e.message });
+  }
   streamProcessAsEvents(child, channel);
   let responded = false;
   child.on('exit', (code) => {
@@ -576,13 +589,11 @@ function runInstall(res, channel, cmd, args, opts = {}) {
 }
 
 app.post('/api/setup/install-chromium', (req, res) => {
-  const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  runInstall(res, 'install_chromium', npx, ['playwright', 'install', 'chromium']);
+  runInstall(res, 'install_chromium', 'npx', ['playwright', 'install', 'chromium']);
 });
 
 app.post('/api/setup/install-deps', (req, res) => {
-  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-  runInstall(res, 'install_deps', npm, ['install', '--no-fund', '--no-audit']);
+  runInstall(res, 'install_deps', 'npm', ['install', '--no-fund', '--no-audit']);
 });
 
 app.post('/api/setup/install-tesseract', (req, res) => {
