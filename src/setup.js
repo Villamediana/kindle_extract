@@ -15,7 +15,7 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { resolveTesseractCmd, platform: hostPlatform, playwrightBrowsersDir } = require('./setup-helpers');
+const { resolveTesseractCmd, platform: hostPlatform, playwrightBrowsersDir, ensureTessdataBest, TESSDATA_LOCAL_PATH, TESSDATA_BEST_URL } = require('./setup-helpers');
 
 const ROOT = path.join(__dirname, '..');
 const COOKIES_PATH = path.join(ROOT, 'cookies.json');
@@ -151,6 +151,20 @@ if (hasTesseract) {
   console.log(`     ${C.dim}2) Durante a instalação, marque "Additional language data → Portuguese"${C.reset}`);
   console.log(`     ${C.dim}3) Abra o UI (npm run server) e cole o caminho do tesseract.exe na aba de Setup${C.reset}`);
   failures++;
+}
+
+// ---------- 4b. tessdata_best (modelo melhor para itálicos) ----------
+step('Verificando tessdata_best para português');
+const tessBest = ensureTessdataBest();
+if (tessBest.state === 'present') {
+  ok(`tessdata/por.traineddata presente (${tessBest.sizeMB} MB)`);
+} else if (tessBest.state === 'downloaded') {
+  ok(`tessdata_best baixado (${tessBest.sizeMB} MB)`);
+} else {
+  fail(`falha ao baixar: ${tessBest.error}`);
+  console.log(`     ${C.dim}baixe manualmente: ${TESSDATA_BEST_URL}${C.reset}`);
+  console.log(`     ${C.dim}salve em: ${TESSDATA_LOCAL_PATH}${C.reset}`);
+  warnings++;
 }
 
 // ---------- 5. Tesseract Portuguese ----------

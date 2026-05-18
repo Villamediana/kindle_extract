@@ -6,8 +6,8 @@ debug/
 tmp_ocr/
 config.json
 cookies.json
-.gbooks-chrome-debug/
 setup.local.json
 server.log
 .env
 *.log
+tessdata/

@@ -18,8 +18,8 @@
         <path d="M8 7h8M8 11h6"/>
       </svg>
       <div>
-        <div class="brand-title">Cloud Reader Extract</div>
-        <div class="brand-sub">Kindle + Google Books → Texto</div>
+        <div class="brand-title">Kindle Extract</div>
+        <div class="brand-sub">Kindle Cloud Reader → Texto</div>
       </div>
     </div>
     <div class="topbar-stats" id="topStats">
@@ -37,7 +37,6 @@
         Setup
         <span id="setupBadge" class="badge-dot" hidden></span>
       </button>
-      <button id="btnManual" class="btn" title="Modo manual Google Books (você navega, script captura)">🤚 Manual GBooks</button>
       <button id="btnCookies" class="btn" title="Configurar cookies do Kindle">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8">
           <path d="M12 3a9 9 0 1 0 9 9 4 4 0 0 1-4-4 4 4 0 0 1-4-4 1 1 0 0 0-1-1z"/>
@@ -113,42 +112,6 @@
     </div>
   </div>
 
-  <!-- Modal modo manual Google Books -->
-  <div id="manualModal" class="modal" hidden>
-    <div class="modal-backdrop"></div>
-    <div class="modal-card">
-      <header class="modal-head">
-        <h2>Manual GBooks — conectar ao seu Chrome</h2>
-        <button class="modal-close" id="manualClose" aria-label="fechar">×</button>
-      </header>
-      <div class="modal-body">
-        <ol class="steps">
-          <li><b>Abrir Chrome</b> — abre uma janela do Chrome em modo debug (perfil isolado, primeira vez você loga no Google nessa janela).</li>
-          <li>No Chrome aberto: navegue até o livro e abra o reader. Espere o conteúdo aparecer (texto/imagem visível na tela).</li>
-          <li>Volta aqui e clica em <b>Conectar</b>. O script conecta na janela aberta via CDP.</li>
-          <li>Clica em <b>Capturar livro aberto</b>. Loop de screenshot + OCR + virar página até o fim.</li>
-          <li>Pra próximo livro: navega na mesma janela e clica em <b>Capturar</b> de novo.</li>
-        </ol>
-        <details>
-          <summary style="cursor:pointer;font-size:12px;color:var(--text-3);margin:8px 0">Já tenho Chrome aberto com <code>--remote-debugging-port=9222</code></summary>
-          <div style="font-size:12px;color:var(--text-3);padding:8px 0">
-            Se você abriu Chrome (ou Brave/Edge) manualmente com a flag de debug, pule o "Abrir Chrome" e clique direto em <b>Conectar</b>. Vai usar essa instância (mantém seu perfil real, logins, tudo).
-          </div>
-        </details>
-        <div id="manualState" class="manual-state">sessão não aberta</div>
-        <div id="manualStatus" class="modal-status"></div>
-      </div>
-      <footer class="modal-foot">
-        <button id="manualLaunch" class="btn">1· Abrir Chrome</button>
-        <button id="manualConnect" class="btn btn-primary">2· Conectar</button>
-        <button id="manualCapture" class="btn btn-primary" disabled>3· Capturar livro aberto</button>
-        <button id="manualCaptureAll" class="btn btn-primary" disabled title="Lista a biblioteca toda e captura cada livro automaticamente">✨ Capturar TODOS</button>
-        <button id="manualAbort" class="btn btn-danger" hidden>Abortar captura</button>
-        <button id="manualCloseChrome" class="btn btn-danger-ghost" disabled>Fechar Chrome</button>
-      </footer>
-    </div>
-  </div>
-
   <!-- Modal de confirmação reset -->
   <div id="confirmModal" class="modal" hidden>
     <div class="modal-backdrop"></div>
@@ -208,7 +171,7 @@
         <div id="liveBody" hidden>
           <div class="now-card">
             <div class="now-head">
-              <div class="now-eyebrow">Extraindo agora <span class="now-counter" id="nowCounter"></span><span id="liveSource" class="live-source-chip" hidden></span></div>
+              <div class="now-eyebrow">Extraindo agora <span class="now-counter" id="nowCounter"></span></div>
               <div class="now-title" id="nowTitle">—</div>
               <div class="now-author" id="nowAuthor"></div>
             </div>

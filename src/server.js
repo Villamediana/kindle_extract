@@ -4,7 +4,6 @@ const fs = require('fs');
 const { spawn, spawnSync } = require('child_process');
 const readline = require('readline');
 const { scanLibrary, mergeIntoConfig, normalizeCookie: libNormalizeCookie } = require('./library');
-const gbooksManual = require('./gbooks_manual');
 const {
   platform: hostPlatform,
   loadSetupLocal,
@@ -14,9 +13,8 @@ const {
   probeTesseractLangs,
   hasChromium,
   hasPlaywright,
-  findChrome,
-  probeChrome,
-  instructionsFor
+  instructionsFor,
+  ensureTessdataBest
 } = require('./setup-helpers');
 
 const ROOT = path.join(__dirname, '..');
@@ -155,20 +153,6 @@ function buildBookList() {
     }
   }
 
-  // Google Books são descobertos a partir dos state.json em output/ —
-  // não tem mais scan prévio nem gbooks-config.json. Cada livro aparece
-  // quando o usuário inicia uma captura manual.
-  for (const b of gbooksManual.listExtractedBooks()) {
-    let status = 'pending';
-    if (b.state && b.state.completed) status = 'completed';
-    else if (b.state && b.state.lastPage > 0) status = 'partial';
-    else if (b.hasFile) status = 'partial';
-    if (runState.running && runState.current
-        && runState.current.source === 'gbooks'
-        && runState.current.key === b.id) status = 'extracting';
-    out.push({ idx: idx++, ...b, status });
-  }
-
   return out;
 }
 
@@ -263,8 +247,7 @@ function runNext() {
     return;
   }
   const item = pendingQueue.shift();
-  if (item.source === 'kindle') spawnKindle(item.keys, runNext);
-  else runNext(); // gbooks não roda em batch — só modo manual via CDP
+  spawnKindle(item.keys, runNext);
 }
 
 app.post('/api/start', (req, res) => {
@@ -277,24 +260,16 @@ app.post('/api/start', (req, res) => {
   let target = [];
 
   if (Array.isArray(body.keys) && body.keys.length > 0) {
-    target = all.filter(b => body.keys.some(k => k.key === b.key && k.source === b.source));
+    target = all.filter(b => body.keys.some(k => k.key === b.key));
   } else if (Array.isArray(body.asins) && body.asins.length > 0) {
-    target = all.filter(b => b.source === 'kindle' && body.asins.includes(b.asin));
+    target = all.filter(b => body.asins.includes(b.asin));
   } else {
     target = all.filter(b => b.status !== 'completed');
   }
 
   if (target.length === 0) return res.status(400).json({ error: 'nenhum livro pendente pra extrair' });
 
-  const kindleKeys = target.filter(b => b.source === 'kindle').map(b => b.asin);
-  const gbooksSkipped = target.filter(b => b.source === 'gbooks').length;
-
-  if (kindleKeys.length === 0) {
-    if (gbooksSkipped > 0) {
-      return res.status(400).json({ error: `${gbooksSkipped} livro(s) do Google Books — use o botão "Manual GBooks" pra extrair` });
-    }
-    return res.status(400).json({ error: 'nenhum livro Kindle pra extrair' });
-  }
+  const kindleKeys = target.map(b => b.asin);
 
   pendingQueue = [];
   pendingQueue.push({ source: 'kindle', keys: kindleKeys });
@@ -303,11 +278,10 @@ app.post('/api/start', (req, res) => {
   runState.startedAt = new Date().toISOString();
   runState.endedAt = null;
   runState.current = null;
-  const note = gbooksSkipped > 0 ? ` (${gbooksSkipped} GBooks pulados — use Manual GBooks)` : '';
-  broadcast({ t: Date.now(), type: 'system', msg: `▶ Iniciando ${kindleKeys.length} Kindle${note}` });
+  broadcast({ t: Date.now(), type: 'system', msg: `▶ Iniciando ${kindleKeys.length} Kindle` });
   runNext();
 
-  res.json({ ok: true, kindle: kindleKeys.length, gbooksSkipped });
+  res.json({ ok: true, kindle: kindleKeys.length });
 });
 
 app.post('/api/stop', (req, res) => {
@@ -441,24 +415,15 @@ app.post('/api/wipe', (req, res) => {
   if (runState.running) {
     return res.status(409).json({ error: 'pare a extração antes de apagar tudo' });
   }
-  const source = (req.body && req.body.source) || 'kindle';
+  const wipeAll = req.body && req.body.source === 'all';
   const removed = [];
-  let targets = [];
-
-  if (source === 'kindle' || source === 'all') {
-    targets.push(
-      { name: 'cookies.json', path: COOKIES_PATH },
-      { name: 'config.json', path: CONFIG_PATH },
-      { name: '.config.run.json', path: path.join(ROOT, '.config.run.json') },
-      { name: 'session/', path: SESSION_DIR }
-    );
-  }
-  if (source === 'gbooks' || source === 'all') {
-    targets.push(
-      { name: '.gbooks-chrome-debug/', path: path.join(ROOT, '.gbooks-chrome-debug') }
-    );
-  }
-  if (source === 'all') {
+  const targets = [
+    { name: 'cookies.json', path: COOKIES_PATH },
+    { name: 'config.json', path: CONFIG_PATH },
+    { name: '.config.run.json', path: path.join(ROOT, '.config.run.json') },
+    { name: 'session/', path: SESSION_DIR }
+  ];
+  if (wipeAll) {
     targets.push(
       { name: 'output/', path: OUTPUT_DIR },
       { name: 'tmp_ocr/', path: path.join(ROOT, 'tmp_ocr') },
@@ -470,21 +435,11 @@ app.post('/api/wipe', (req, res) => {
     if (rmIfExists(t.path)) removed.push(t.name);
   }
 
-  // remove arquivos extraídos da fonte específica
-  try {
-    for (const f of fs.readdirSync(OUTPUT_DIR)) {
-      const isGbooks = f.startsWith('gbooks_');
-      if ((source === 'gbooks' && isGbooks) || (source === 'kindle' && !isGbooks)) {
-        try { fs.unlinkSync(path.join(OUTPUT_DIR, f)); removed.push('output/' + f); } catch {}
-      }
-    }
-  } catch {}
-
   for (const d of [OUTPUT_DIR, path.join(ROOT, 'tmp_ocr')]) {
     try { fs.mkdirSync(d, { recursive: true }); } catch {}
   }
-  if (source === 'all') logBuffer = [];
-  broadcast({ t: Date.now(), type: 'system', msg: `Wipe (${source}): ${removed.join(', ') || 'nada removido'}` });
+  if (wipeAll) logBuffer = [];
+  broadcast({ t: Date.now(), type: 'system', msg: `Wipe: ${removed.join(', ') || 'nada removido'}` });
   res.json({ ok: true, removed });
 });
 
@@ -522,70 +477,7 @@ app.post('/api/scan-library', async (req, res) => {
   }
 });
 
-// ----- Modo manual Google Books (CDP attach) -----
-
-app.get('/api/gbooks/manual/status', async (req, res) => {
-  try { res.json(await gbooksManual.status()); }
-  catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-app.post('/api/gbooks/manual/launch-chrome', async (req, res) => {
-  try { res.json(await gbooksManual.launchChrome({ broadcast })); }
-  catch (e) {
-    broadcast({ t: Date.now(), type: 'gbooks_manual', msg: 'Erro launch: ' + e.message, err: true });
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.post('/api/gbooks/manual/connect', async (req, res) => {
-  try { res.json(await gbooksManual.connect({ broadcast })); }
-  catch (e) {
-    broadcast({ t: Date.now(), type: 'gbooks_manual', msg: 'Erro connect: ' + e.message, err: true });
-    res.status(400).json({ error: e.message });
-  }
-});
-
-app.post('/api/gbooks/manual/capture-current', async (req, res) => {
-  try {
-    const promise = gbooksManual.captureCurrent({ broadcast, settings: req.body || {} });
-    promise.catch(e => {
-      broadcast({ t: Date.now(), type: 'gbooks_manual', msg: 'Captura erro: ' + e.message, err: true });
-    });
-    res.json({ ok: true, started: true });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-app.post('/api/gbooks/manual/capture-all', async (req, res) => {
-  try {
-    const promise = gbooksManual.captureAll({
-      broadcast,
-      settings: req.body || {},
-      skipCompleted: req.body?.skipCompleted !== false
-    });
-    promise.catch(e => {
-      broadcast({ t: Date.now(), type: 'gbooks_manual', msg: 'Capturar TODOS erro: ' + e.message, err: true });
-    });
-    res.json({ ok: true, started: true });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-app.post('/api/gbooks/manual/abort', async (req, res) => {
-  res.json(await gbooksManual.abortCapture());
-});
-
-app.post('/api/gbooks/manual/disconnect', async (req, res) => {
-  res.json(await gbooksManual.disconnect());
-});
-
-app.post('/api/gbooks/manual/close-chrome', async (req, res) => {
-  res.json(await gbooksManual.closeChrome());
-});
-
-// ----- Reset de livro (qualquer fonte) -----
+// ----- Reset de livro -----
 
 app.post('/api/book/:key/reset', (req, res) => {
   const key = req.params.key;
@@ -639,15 +531,6 @@ function buildSetupStatus() {
   } else {
     items.tesseractPor = { ok: false, availableLangs: [] };
   }
-
-  const cProbe = probeChrome();
-  items.chrome = {
-    ok: cProbe.ok,
-    version: cProbe.version || null,
-    path: cProbe.path || null,
-    error: cProbe.ok ? null : cProbe.error,
-    optional: true // não bloqueia Kindle, só afeta Google Books DRM
-  };
 
   let kindleCookiesValid = false;
   if (fs.existsSync(COOKIES_PATH)) {
@@ -769,49 +652,6 @@ app.post('/api/setup/install-tesseract-por', (req, res) => {
   runInstall(res, 'install_tesseract_por', cmd, args);
 });
 
-app.post('/api/setup/install-chrome', (req, res) => {
-  if (process.platform === 'linux') {
-    const debPath = '/tmp/google-chrome-stable_current_amd64.deb';
-    const isRoot = process.getuid && process.getuid() === 0;
-    // wget: --progress=dot:giga emite "10%, 20%..." em vez de barra ANSI.
-    // apt: -o Dpkg::Use-Pty=0 evita TTY que esconde output do spawn.
-    // sudo -n: se faltar sudoers config, falha imediato com mensagem clara.
-    const installer = isRoot ? 'apt' : 'sudo -n';
-    const shellCmd = [
-      `echo '▶ Baixando Chrome (.deb oficial, ~95MB)...'`,
-      `wget --progress=dot:giga -O ${debPath} https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb`,
-      `echo '▶ Instalando com apt (resolvendo dependências)...'`,
-      `${installer} apt -o Dpkg::Use-Pty=0 install -y ${debPath}`,
-      `echo '✓ Instalação concluída'`
-    ].join(' && ');
-    runInstall(res, 'install_chrome', 'bash', ['-c', shellCmd]);
-    return;
-  }
-  if (process.platform === 'darwin') {
-    runInstall(res, 'install_chrome', 'brew', ['install', '--cask', 'google-chrome']);
-    return;
-  }
-  return res.status(400).json({ error: 'auto-install não disponível no Windows — baixe o instalador em https://www.google.com/chrome/' });
-});
-
-app.post('/api/setup/chrome-detect', (req, res) => {
-  const p = findChrome();
-  if (!p) return res.json({ ok: false, found: false });
-  const probe = probeChrome(p);
-  res.json({ ok: probe.ok, found: true, path: p, version: probe.version, error: probe.error || null });
-});
-
-app.post('/api/setup/chrome-path', (req, res) => {
-  const { path: customPath, save } = req.body || {};
-  if (!customPath || typeof customPath !== 'string') return res.status(400).json({ error: 'campo "path" é obrigatório' });
-  const trimmed = customPath.trim().replace(/^["']|["']$/g, '');
-  if (!fs.existsSync(trimmed)) return res.status(400).json({ ok: false, error: `arquivo não encontrado: ${trimmed}` });
-  const probe = probeChrome(trimmed);
-  if (!probe.ok) return res.status(400).json({ ok: false, error: probe.error || 'não consegui executar' });
-  if (save) saveSetupLocal({ chromePath: trimmed });
-  res.json({ ok: true, version: probe.version, saved: !!save });
-});
-
 app.post('/api/setup/tesseract-path', (req, res) => {
   const { path: customPath, save } = req.body || {};
   if (!customPath || typeof customPath !== 'string') return res.status(400).json({ error: 'campo "path" é obrigatório' });
@@ -845,6 +685,16 @@ app.post('/api/setup/tesseract-detect', (req, res) => {
   }
   res.json({ ok: found.length > 0, candidates: found });
 });
+
+// Garante tessdata_best/por.traineddata antes de aceitar requests.
+// É bloqueante (curl síncrono) — primeiro startup pode demorar uns segundos pra
+// baixar ~7.8 MB. Próximos startups detectam que tá presente e seguem direto.
+const tessBest = ensureTessdataBest();
+if (tessBest.state === 'downloaded') {
+  console.log(`✓ tessdata_best baixado (${tessBest.sizeMB} MB) — OCR vai usar modelo melhor`);
+} else if (tessBest.state === 'failed') {
+  console.warn(`⚠ falha ao baixar tessdata_best: ${tessBest.error} — OCR vai usar tessdata do sistema`);
+}
 
 app.listen(PORT, () => {
   console.log(`Cloud Reader Extract UI rodando em http://localhost:${PORT}`);

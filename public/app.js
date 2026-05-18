@@ -9,7 +9,6 @@
     selectedKey: null,
     activeTab: 'live',
     filter: 'all',
-    sourceFilter: 'all',
     searchQuery: '',
     readerFontSize: 18,
     logsPaused: false,
@@ -42,9 +41,6 @@
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
-  function srcLabel(s) { return s === 'gbooks' ? 'Google Books' : 'Kindle'; }
-  function srcBadge(s) { return s === 'gbooks' ? 'G' : 'K'; }
-  function idLabel(s) { return s === 'gbooks' ? 'ID' : 'ASIN'; }
 
   function toast(msg, type='info') {
     const el = $('#toast');
@@ -115,7 +111,6 @@
     $('#cntPending').textContent = counts.pending;
 
     const filtered = state.books.filter(b => {
-      if (state.sourceFilter !== 'all' && b.source !== state.sourceFilter) return false;
       if (state.filter === 'completed' && b.status !== 'completed') return false;
       if (state.filter === 'partial' && b.status !== 'partial' && b.status !== 'extracting') return false;
       if (state.filter === 'pending' && b.status !== 'pending') return false;
@@ -130,10 +125,8 @@
       li.dataset.key = b.key;
       const sizeStr = b.txtSize ? fmtBytes(b.txtSize) : '';
       const canReset = b.hasFile || (b.state && b.state.lastPage > 0);
-      const badgeClass = 'book-source' + (b.source === 'gbooks' ? ' gb' : '');
       li.innerHTML = `
         <span class="book-status-dot ${b.status}"></span>
-        <span class="${badgeClass}" title="${escapeHtml(srcLabel(b.source))}">${srcBadge(b.source)}</span>
         <div class="book-info">
           <div class="book-title">${escapeHtml(b.title)}</div>
           <div class="book-author">${escapeHtml(b.author || '—')}</div>
@@ -155,7 +148,7 @@
     }
     if (!filtered.length) {
       const msg = state.books.length === 0
-        ? 'cole os cookies (Kindle ou Google) pra importar livros'
+        ? 'cole os cookies do Kindle pra importar livros'
         : 'nenhum livro nesse filtro';
       list.innerHTML = `<li style="padding:20px;text-align:center;color:var(--text-3);font-size:12px">${escapeHtml(msg)}</li>`;
     }
@@ -166,7 +159,6 @@
     if (!live) {
       $('#liveEmpty').hidden = false;
       $('#liveBody').hidden = true;
-      $('#liveSource').hidden = true;
       return;
     }
     $('#liveEmpty').hidden = true;
@@ -176,14 +168,6 @@
     $('#nowTitle').textContent = live.title || live.key;
     const book = state.books.find(b => b.key === live.key);
     $('#nowAuthor').textContent = book?.author || '';
-
-    if (live.source) {
-      $('#liveSource').hidden = false;
-      $('#liveSource').textContent = srcLabel(live.source);
-      $('#liveSource').className = 'live-source-chip' + (live.source === 'gbooks' ? ' gb' : '');
-    } else {
-      $('#liveSource').hidden = true;
-    }
 
     $('#mPage').textContent = fmtNum(live.page || 0);
     $('#mChars').textContent = fmtNum(live.totalChars || 0);
@@ -250,7 +234,7 @@
     $('#rTitle').textContent = b.title;
     $('#rAuthor').textContent = b.author ? `por ${b.author}` : '';
     $('#rAuthor').hidden = !b.author;
-    $('#rAsin').textContent = `${srcLabel(b.source)} · ${idLabel(b.source)} ${b.key}`;
+    $('#rAsin').textContent = `ASIN ${b.key}`;
 
     const pages = b.state?.lastPage || 0;
     const totalChars = b.state?.totalChars || extra.size || 0;
@@ -285,10 +269,9 @@
           await api('/api/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ keys: [{ key: b.key, source: b.source }] })
+            body: JSON.stringify({ keys: [{ key: b.key }] })
           });
-          const note = b.source === 'gbooks' ? ' (browser visível)' : '';
-          toast(`Extraindo "${b.title}"…${note}`);
+          toast(`Extraindo "${b.title}"…`);
           switchTab('live');
         } catch (e) { toast('Erro: ' + e.message, 'err'); }
       };
@@ -334,8 +317,7 @@
     const line = document.createElement('div');
     line.className = 'log-line';
     const ident = ev.title || ev.id || ev.asin || '';
-    const srcTag = ev.source ? `[${ev.source === 'gbooks' ? 'G' : 'K'}] ` : '';
-    const msg = ev.msg || (ev.type === 'page' ? `${srcTag}pág ${ev.page} · ${fmtBytes(ev.totalChars)} · ${(ev.rate||0).toFixed(2)} pg/s` : ev.type === 'book_start' ? `${srcTag}★ ${ident}` : ev.type === 'book_end' ? `${srcTag}${ev.completed ? `✓ ${fmtNum(ev.lastPage)} págs · ${fmtBytes(ev.totalChars)}` : `⚠ ${ev.abortReason || 'parado'}`}` : JSON.stringify(ev));
+    const msg = ev.msg || (ev.type === 'page' ? `pág ${ev.page} · ${fmtBytes(ev.totalChars)} · ${(ev.rate||0).toFixed(2)} pg/s` : ev.type === 'book_start' ? `★ ${ident}` : ev.type === 'book_end' ? (ev.completed ? `✓ ${fmtNum(ev.lastPage)} págs · ${fmtBytes(ev.totalChars)}` : `⚠ ${ev.abortReason || 'parado'}`) : JSON.stringify(ev));
     line.innerHTML = `
       <span class="log-time">${fmtHms(ev.t)}</span>
       <span class="log-type ${ev.type}">${ev.type}</span>
@@ -353,7 +335,6 @@
     const evKey = eventKey(ev);
     if (ev.type === 'book_start' || ev.type === 'book_skip') {
       state.current = {
-        source: ev.source,
         key: evKey, asin: ev.asin, id: ev.id, title: ev.title, idx: ev.idx, total: ev.total,
         page: ev.startFromPage || 0, totalChars: 0, rate: 0, preview: '',
         file: ev.file || null,
@@ -396,10 +377,6 @@
       if (state.scanActive) {
         setCookieStatus(`✓ ${ev.total} livros importados (${ev.added} novos).`, 'ok');
       }
-    } else if (ev.type === 'browser_info') {
-      if (ev.usedChrome === false) {
-        toast('⚠ Chromium sem Widevine — livros DRM do Google Books vão falhar. Instale o Chrome.', 'err');
-      }
     } else if (ev.type && ev.type.startsWith('install_')) {
       appendSetupConsole(ev.msg || '');
     }
@@ -420,11 +397,10 @@
     chromium: 'Chromium (Playwright)',
     tesseract: 'Tesseract OCR',
     tesseractPor: 'Idioma português (Tesseract)',
-    chrome: 'Google Chrome (pra Google Books — CDP manual)',
     cookies: 'Cookies do Kindle',
     config: 'Lista de livros Kindle'
   };
-  const ITEM_ORDER = ['node', 'playwright', 'chromium', 'tesseract', 'tesseractPor', 'chrome', 'cookies', 'config'];
+  const ITEM_ORDER = ['node', 'playwright', 'chromium', 'tesseract', 'tesseractPor', 'cookies', 'config'];
 
   let setupAutoOpened = false;
   let setupStatusCache = null;
@@ -457,8 +433,6 @@
     else if (key === 'tesseract' && item.ok) detailLine = item.version || '';
     else if (key === 'tesseract' && !item.ok) detailLine = item.error ? `erro: ${item.error}` : 'não encontrado';
     else if (key === 'tesseractPor' && item.availableLangs?.length) detailLine = `idiomas: ${item.availableLangs.join(', ')}`;
-    else if (key === 'chrome' && item.ok) detailLine = item.version || item.path || '';
-    else if (key === 'chrome' && !item.ok) detailLine = 'não instalado — Kindle funciona sem isso';
     else if (key === 'config' && item.bookCount) detailLine = `${item.bookCount} livros`;
     else if (item.ok) detailLine = 'tudo certo';
     else detailLine = 'não configurado';
@@ -732,7 +706,7 @@
   async function confirmReset(book) {
     confirmDialog(
       'Apagar conteúdo extraído?',
-      `Remove o .txt e o estado salvo de "${book.title}" (${srcLabel(book.source)}). Nada começa automaticamente.`,
+      `Remove o .txt e o estado salvo de "${book.title}". Nada começa automaticamente.`,
       async () => {
         try {
           const r = await api(`/api/book/${encodeURIComponent(book.key)}/reset`, { method: 'POST' });
@@ -812,7 +786,7 @@
   $('#btnWipeAll').addEventListener('click', () => {
     confirmDialog(
       'Apagar tudo?',
-      'Remove cookies, lista de livros e textos extraídos de AMBAS as fontes (Kindle + Google Books). Não dá pra desfazer.',
+      'Remove cookies, lista de livros e textos extraídos. Não dá pra desfazer.',
       async () => {
         try {
           const r = await api('/api/wipe', {
@@ -836,146 +810,11 @@
     if (b) confirmReset(b);
   });
 
-  // ---- modo manual Google Books (CDP attach) ----
-  async function refreshManualState() {
-    try {
-      const s = await api('/api/gbooks/manual/status');
-      const el = $('#manualState');
-      const cap = s.capturing;
-      const lines = [];
-
-      if (!s.chromeRunning && !s.portOpen) {
-        lines.push('<span>nenhum Chrome em modo debug</span>');
-      } else if (s.portOpen && !s.connected) {
-        lines.push(`<span class="ms-ok">✓ Chrome em :9222 ouvindo</span> — clique <b>Conectar</b>`);
-      } else if (s.connected) {
-        lines.push(`<span class="ms-ok">✓ Conectado via CDP</span> · ${s.pageCount} aba(s)`);
-        lines.push(`URL: <code>${escapeHtml(s.currentUrl || '(vazio)')}</code>`);
-        if (s.onReader) {
-          lines.push(`<span class="ms-ok">✓ aba no reader</span> · ID: <code>${escapeHtml(s.bookId || '?')}</code>`);
-        } else {
-          lines.push('<span class="ms-warn">⚠ nenhuma aba no reader — navegue até o livro no Chrome</span>');
-        }
-        if (cap) lines.push('<span class="ms-warn">⏳ capturando…</span>');
-      }
-      el.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
-
-      $('#manualLaunch').disabled = s.chromeRunning || s.portOpen;
-      $('#manualLaunch').textContent = (s.chromeRunning || s.portOpen) ? '1· Chrome aberto' : '1· Abrir Chrome';
-      $('#manualConnect').disabled = !s.portOpen || s.connected;
-      $('#manualConnect').textContent = s.connected ? '2· Conectado' : '2· Conectar';
-      $('#manualCapture').disabled = !s.connected || !s.onReader || cap;
-      $('#manualCaptureAll').disabled = !s.connected || cap;
-      $('#manualAbort').hidden = !cap;
-      $('#manualCloseChrome').disabled = !s.chromeRunning && !s.portOpen;
-    } catch (e) {
-      $('#manualState').textContent = 'erro: ' + e.message;
-    }
-  }
-
-  let manualStatusTimer = null;
-  function startManualPolling() {
-    refreshManualState();
-    if (manualStatusTimer) clearInterval(manualStatusTimer);
-    manualStatusTimer = setInterval(refreshManualState, 2000);
-  }
-  function stopManualPolling() {
-    if (manualStatusTimer) { clearInterval(manualStatusTimer); manualStatusTimer = null; }
-  }
-
-  $('#btnManual').addEventListener('click', () => {
-    openModal('manualModal');
-    startManualPolling();
-  });
-  $('#manualClose').addEventListener('click', () => {
-    closeModal('manualModal');
-    stopManualPolling();
-  });
-
-  $('#manualLaunch').addEventListener('click', async () => {
-    $('#manualLaunch').disabled = true;
-    $('#manualLaunch').textContent = 'abrindo…';
-    try {
-      await api('/api/gbooks/manual/launch-chrome', { method: 'POST' });
-      toast('Chrome aberto — logue no Google nessa janela');
-      refreshManualState();
-    } catch (e) {
-      toast('Erro: ' + e.message, 'err');
-      refreshManualState();
-    }
-  });
-
-  $('#manualConnect').addEventListener('click', async () => {
-    $('#manualConnect').disabled = true;
-    $('#manualConnect').textContent = 'conectando…';
-    try {
-      await api('/api/gbooks/manual/connect', { method: 'POST' });
-      toast('Conectado — navegue até o livro no Chrome');
-      refreshManualState();
-    } catch (e) {
-      toast('Erro: ' + e.message, 'err');
-      refreshManualState();
-    }
-  });
-
-  $('#manualCapture').addEventListener('click', async () => {
-    $('#manualCapture').disabled = true;
-    try {
-      await api('/api/gbooks/manual/capture-current', {
-        method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}'
-      });
-      toast('Captura iniciada — acompanhe na aba "Ao vivo"');
-      closeModal('manualModal');
-      stopManualPolling();
-      switchTab('live');
-    } catch (e) {
-      toast('Erro: ' + e.message, 'err');
-      $('#manualCapture').disabled = false;
-    }
-  });
-
-  $('#manualCaptureAll').addEventListener('click', async () => {
-    if (!confirm('Capturar TODOS os livros da biblioteca?\n\nVai listar a biblioteca, entrar em cada livro, ir pra primeira página e capturar tudo. Pode demorar horas. Livros já completos são pulados. Você pode parar com "Abortar captura".\n\nIMPORTANTE: deixa a janela do Chrome visível e não mexe nela enquanto roda.')) return;
-    $('#manualCaptureAll').disabled = true;
-    try {
-      await api('/api/gbooks/manual/capture-all', {
-        method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}'
-      });
-      toast('Capturar TODOS iniciado — acompanhe na aba "Ao vivo"');
-      closeModal('manualModal');
-      stopManualPolling();
-      switchTab('live');
-    } catch (e) {
-      toast('Erro: ' + e.message, 'err');
-      $('#manualCaptureAll').disabled = false;
-    }
-  });
-
-  $('#manualAbort').addEventListener('click', async () => {
-    if (!confirm('Abortar captura atual?')) return;
-    try {
-      await api('/api/gbooks/manual/abort', { method: 'POST' });
-      toast('Abortando…');
-    } catch (e) { toast('Erro: ' + e.message, 'err'); }
-  });
-
-  $('#manualCloseChrome').addEventListener('click', async () => {
-    if (!confirm('Fechar Chrome e encerrar sessão?')) return;
-    try {
-      await api('/api/gbooks/manual/close-chrome', { method: 'POST' });
-      toast('Chrome fechado');
-      refreshManualState();
-    } catch (e) { toast('Erro: ' + e.message, 'err'); }
-  });
-
   // ---- start/stop ----
   $('#btnStart').addEventListener('click', async () => {
     try {
       const r = await api('/api/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-      const parts = [];
-      if (r.kindle) parts.push(`${r.kindle} Kindle`);
-      if (r.gbooks) parts.push(`${r.gbooks} Google Books (browser visível)`);
-      toast(parts.length ? `Fila: ${parts.join(' + ')}` : 'Extração iniciada');
+      toast(r.kindle ? `Fila: ${r.kindle} Kindle` : 'Extração iniciada');
     } catch (e) { toast('Erro: ' + e.message, 'err'); }
   });
 

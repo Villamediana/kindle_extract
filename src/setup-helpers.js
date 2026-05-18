@@ -106,68 +106,6 @@ function hasPlaywright() {
   try { require.resolve('playwright'); return true; } catch { return false; }
 }
 
-// Localiza Google Chrome real (não Chromium) — necessário pra Widevine DRM
-// que o Google Play Books usa pra livros pagos.
-function findChrome() {
-  const local = loadSetupLocal();
-  if (local.chromePath && fs.existsSync(local.chromePath)) return local.chromePath;
-
-  const candidates = [];
-  if (process.platform === 'darwin') {
-    candidates.push(
-      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-      '/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta'
-    );
-  } else if (process.platform === 'win32') {
-    const pf = process.env['PROGRAMFILES'] || 'C:\\Program Files';
-    const pf86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
-    const localAppData = process.env.LOCALAPPDATA || '';
-    candidates.push(
-      path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-      path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe')
-    );
-  } else {
-    candidates.push(
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/opt/google/chrome/chrome',
-      '/snap/bin/google-chrome'
-    );
-  }
-  for (const c of candidates) {
-    if (fs.existsSync(c)) return c;
-  }
-  return null;
-}
-
-function probeChrome(p) {
-  const cmd = p || findChrome();
-  if (!cmd) return { ok: false, error: 'não encontrado' };
-
-  // No Windows, chrome.exe --version não imprime no stdout (lança outro processo);
-  // spawnSync trava. Confia na existência do arquivo e tenta ler versão via wmic.
-  if (process.platform === 'win32') {
-    let version = '';
-    try {
-      const r = spawnSync('wmic', ['datafile', 'where', `name="${cmd.replace(/\\/g, '\\\\')}"`, 'get', 'Version', '/value'],
-        { encoding: 'utf-8', timeout: 4000 });
-      const m = (r.stdout || '').match(/Version=(.+)/);
-      if (m) version = 'Google Chrome ' + m[1].trim();
-    } catch {}
-    return { ok: true, version: version || 'Google Chrome (Windows)', path: cmd };
-  }
-
-  try {
-    const r = spawnSync(cmd, ['--version'], { encoding: 'utf-8', timeout: 4000 });
-    if (r.error) return { ok: false, error: r.error.message };
-    if (r.status !== 0) return { ok: false, error: (r.stderr || '').slice(0, 200) };
-    return { ok: true, version: (r.stdout || '').trim(), path: cmd };
-  } catch (e) {
-    return { ok: false, error: e.message };
-  }
-}
-
 // Instruções de instalação por plataforma + item. Frontend renderiza isto.
 function instructionsFor(item, plat = platform()) {
   const TABLE = {
@@ -250,33 +188,6 @@ function instructionsFor(item, plat = platform()) {
         title: 'Importar lista de livros',
         note: 'Gerado automaticamente após validar os cookies. Se quiser editar manualmente, use config.example.json como base.'
       }
-    },
-    chrome: {
-      linux: {
-        title: 'Instalar Google Chrome (só pra Google Books)',
-        autoInstall: { endpoint: '/api/setup/install-chrome', label: 'Instalar Chrome via .deb oficial' },
-        commands: [
-          'wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb',
-          'sudo apt install -y /tmp/chrome.deb'
-        ],
-        note: 'Chromium bundled do Playwright não tem Widevine. Pra livros DRM-protected do Play Books precisa do Chrome real.'
-      },
-      mac: {
-        title: 'Instalar Google Chrome (só pra Google Books)',
-        autoInstall: { endpoint: '/api/setup/install-chrome', label: 'Instalar via Homebrew' },
-        commands: ['brew install --cask google-chrome'],
-        note: 'Precisa do Homebrew (https://brew.sh). Chrome real tem Widevine; Chromium bundled não.'
-      },
-      windows: {
-        title: 'Instalar Google Chrome (só pra Google Books)',
-        download: 'https://www.google.com/chrome/',
-        steps: [
-          'Baixe o instalador do Chrome no link acima',
-          'Execute e siga o wizard padrão',
-          'Volte aqui e clique em "Re-verificar"'
-        ],
-        note: 'Chromium bundled do Playwright não tem Widevine. Pra livros DRM-protected do Play Books precisa do Chrome real.'
-      }
     }
   };
 
@@ -285,9 +196,44 @@ function instructionsFor(item, plat = platform()) {
   return t[plat] || t._all || null;
 }
 
+// Garante que tessdata/por.traineddata (modelo "best", melhor pra itálicos)
+// está presente em <projeto>/tessdata. Chamado tanto pelo setup.js quanto pelo
+// server.js no startup. Usa curl síncrono (Linux/Mac/Win10+) com fallback
+// PowerShell. Retorna { state: 'present'|'downloaded'|'failed', error?, sizeMB? }.
+const TESSDATA_BEST_URL = 'https://github.com/tesseract-ocr/tessdata_best/raw/main/por.traineddata';
+const TESSDATA_BEST_MIN_BYTES = 5 * 1024 * 1024; // arquivo real ~7.8 MB
+const TESSDATA_LOCAL_DIR = path.join(ROOT, 'tessdata');
+const TESSDATA_LOCAL_PATH = path.join(TESSDATA_LOCAL_DIR, 'por.traineddata');
+
+function ensureTessdataBest({ quiet = false } = {}) {
+  if (fs.existsSync(TESSDATA_LOCAL_PATH) && fs.statSync(TESSDATA_LOCAL_PATH).size >= TESSDATA_BEST_MIN_BYTES) {
+    return { state: 'present', sizeMB: (fs.statSync(TESSDATA_LOCAL_PATH).size / 1024 / 1024).toFixed(1) };
+  }
+  fs.mkdirSync(TESSDATA_LOCAL_DIR, { recursive: true });
+  const tmp = TESSDATA_LOCAL_PATH + '.part';
+  try { fs.unlinkSync(tmp); } catch {}
+
+  const stdio = quiet ? 'ignore' : 'inherit';
+  let r = spawnSync('curl', ['-fsSL', '-o', tmp, TESSDATA_BEST_URL], { stdio });
+  if (r.status !== 0 && platform() === 'windows') {
+    const ps = `Invoke-WebRequest -Uri "${TESSDATA_BEST_URL}" -OutFile "${tmp}" -UseBasicParsing`;
+    r = spawnSync('powershell', ['-NoProfile', '-Command', ps], { stdio });
+  }
+
+  if (r.status === 0 && fs.existsSync(tmp) && fs.statSync(tmp).size >= TESSDATA_BEST_MIN_BYTES) {
+    fs.renameSync(tmp, TESSDATA_LOCAL_PATH);
+    return { state: 'downloaded', sizeMB: (fs.statSync(TESSDATA_LOCAL_PATH).size / 1024 / 1024).toFixed(1) };
+  }
+  try { fs.unlinkSync(tmp); } catch {}
+  return { state: 'failed', error: 'curl falhou (e PowerShell, se Windows)' };
+}
+
 module.exports = {
   ROOT,
   SETUP_LOCAL_PATH,
+  TESSDATA_LOCAL_DIR,
+  TESSDATA_LOCAL_PATH,
+  TESSDATA_BEST_URL,
   platform,
   loadSetupLocal,
   saveSetupLocal,
@@ -297,7 +243,6 @@ module.exports = {
   playwrightBrowsersDir,
   hasChromium,
   hasPlaywright,
-  findChrome,
-  probeChrome,
-  instructionsFor
+  instructionsFor,
+  ensureTessdataBest
 };
