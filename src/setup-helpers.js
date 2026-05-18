@@ -60,7 +60,7 @@ function resolveTesseractCmd() {
 function probeTesseract(cmd) {
   const c = cmd || resolveTesseractCmd();
   try {
-    const r = spawnSync(c, ['--version'], { encoding: 'utf-8' });
+    const r = spawnSync(c, ['--version'], { encoding: 'utf-8', timeout: 4000 });
     if (r.error) return { ok: false, error: r.error.message, cmd: c };
     if (r.status !== 0) return { ok: false, error: (r.stderr || r.stdout || '').slice(0, 200), cmd: c };
     const first = (r.stdout || r.stderr || '').split('\n')[0].trim();
@@ -73,7 +73,7 @@ function probeTesseract(cmd) {
 function probeTesseractLangs(cmd) {
   const c = cmd || resolveTesseractCmd();
   try {
-    const r = spawnSync(c, ['--list-langs'], { encoding: 'utf-8' });
+    const r = spawnSync(c, ['--list-langs'], { encoding: 'utf-8', timeout: 4000 });
     if (r.status !== 0) return { ok: false, langs: [] };
     const langs = (r.stdout + r.stderr).split('\n').map(s => s.trim()).filter(s => s && !s.includes(':'));
     return { ok: true, langs };
@@ -104,6 +104,68 @@ function hasChromium() {
 
 function hasPlaywright() {
   try { require.resolve('playwright'); return true; } catch { return false; }
+}
+
+// Localiza Google Chrome real (não Chromium) — necessário pra Widevine DRM
+// que o Google Play Books usa pra livros pagos.
+function findChrome() {
+  const local = loadSetupLocal();
+  if (local.chromePath && fs.existsSync(local.chromePath)) return local.chromePath;
+
+  const candidates = [];
+  if (process.platform === 'darwin') {
+    candidates.push(
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Google Chrome Beta.app/Contents/MacOS/Google Chrome Beta'
+    );
+  } else if (process.platform === 'win32') {
+    const pf = process.env['PROGRAMFILES'] || 'C:\\Program Files';
+    const pf86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+    const localAppData = process.env.LOCALAPPDATA || '';
+    candidates.push(
+      path.join(pf, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(pf86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      path.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe')
+    );
+  } else {
+    candidates.push(
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/opt/google/chrome/chrome',
+      '/snap/bin/google-chrome'
+    );
+  }
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
+function probeChrome(p) {
+  const cmd = p || findChrome();
+  if (!cmd) return { ok: false, error: 'não encontrado' };
+
+  // No Windows, chrome.exe --version não imprime no stdout (lança outro processo);
+  // spawnSync trava. Confia na existência do arquivo e tenta ler versão via wmic.
+  if (process.platform === 'win32') {
+    let version = '';
+    try {
+      const r = spawnSync('wmic', ['datafile', 'where', `name="${cmd.replace(/\\/g, '\\\\')}"`, 'get', 'Version', '/value'],
+        { encoding: 'utf-8', timeout: 4000 });
+      const m = (r.stdout || '').match(/Version=(.+)/);
+      if (m) version = 'Google Chrome ' + m[1].trim();
+    } catch {}
+    return { ok: true, version: version || 'Google Chrome (Windows)', path: cmd };
+  }
+
+  try {
+    const r = spawnSync(cmd, ['--version'], { encoding: 'utf-8', timeout: 4000 });
+    if (r.error) return { ok: false, error: r.error.message };
+    if (r.status !== 0) return { ok: false, error: (r.stderr || '').slice(0, 200) };
+    return { ok: true, version: (r.stdout || '').trim(), path: cmd };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 }
 
 // Instruções de instalação por plataforma + item. Frontend renderiza isto.
@@ -188,6 +250,33 @@ function instructionsFor(item, plat = platform()) {
         title: 'Importar lista de livros',
         note: 'Gerado automaticamente após validar os cookies. Se quiser editar manualmente, use config.example.json como base.'
       }
+    },
+    chrome: {
+      linux: {
+        title: 'Instalar Google Chrome (só pra Google Books)',
+        autoInstall: { endpoint: '/api/setup/install-chrome', label: 'Instalar Chrome via .deb oficial' },
+        commands: [
+          'wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -O /tmp/chrome.deb',
+          'sudo apt install -y /tmp/chrome.deb'
+        ],
+        note: 'Chromium bundled do Playwright não tem Widevine. Pra livros DRM-protected do Play Books precisa do Chrome real.'
+      },
+      mac: {
+        title: 'Instalar Google Chrome (só pra Google Books)',
+        autoInstall: { endpoint: '/api/setup/install-chrome', label: 'Instalar via Homebrew' },
+        commands: ['brew install --cask google-chrome'],
+        note: 'Precisa do Homebrew (https://brew.sh). Chrome real tem Widevine; Chromium bundled não.'
+      },
+      windows: {
+        title: 'Instalar Google Chrome (só pra Google Books)',
+        download: 'https://www.google.com/chrome/',
+        steps: [
+          'Baixe o instalador do Chrome no link acima',
+          'Execute e siga o wizard padrão',
+          'Volte aqui e clique em "Re-verificar"'
+        ],
+        note: 'Chromium bundled do Playwright não tem Widevine. Pra livros DRM-protected do Play Books precisa do Chrome real.'
+      }
     }
   };
 
@@ -208,5 +297,7 @@ module.exports = {
   playwrightBrowsersDir,
   hasChromium,
   hasPlaywright,
+  findChrome,
+  probeChrome,
   instructionsFor
 };

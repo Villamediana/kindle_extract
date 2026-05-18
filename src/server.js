@@ -4,6 +4,7 @@ const fs = require('fs');
 const { spawn, spawnSync } = require('child_process');
 const readline = require('readline');
 const { scanLibrary, mergeIntoConfig, normalizeCookie: libNormalizeCookie } = require('./library');
+const gbooksManual = require('./gbooks_manual');
 const {
   platform: hostPlatform,
   loadSetupLocal,
@@ -13,6 +14,8 @@ const {
   probeTesseractLangs,
   hasChromium,
   hasPlaywright,
+  findChrome,
+  probeChrome,
   instructionsFor
 } = require('./setup-helpers');
 
@@ -31,17 +34,54 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.static(PUBLIC_DIR));
 
 let child = null;
+let pendingQueue = [];
 let clients = new Set();
 let logBuffer = [];
 let runState = {
   running: false,
   startedAt: null,
   endedAt: null,
-  current: null,        // { asin, title, idx, total, page, totalChars, rate, preview, file }
+  current: null,
   recentEvents: []
 };
 
+function applyEventToRunState(evt) {
+  if (evt.type === 'book_start' || evt.type === 'book_skip') {
+    if (!runState.running) runState.startedAt = new Date().toISOString();
+    runState.running = true;
+    runState.current = {
+      source: evt.source || 'kindle',
+      key: evt.id || evt.asin,
+      asin: evt.asin, id: evt.id,
+      title: evt.title, idx: evt.idx, total: evt.total,
+      page: evt.startFromPage || 0,
+      totalChars: 0, rate: 0, preview: '',
+      file: evt.file || null,
+      startedAt: Date.now()
+    };
+  } else if (evt.type === 'page') {
+    const k = evt.id || evt.asin;
+    if (runState.current && runState.current.key === k) {
+      runState.current.page = evt.page;
+      runState.current.totalChars = evt.totalChars;
+      runState.current.rate = evt.rate;
+      runState.current.preview = evt.preview;
+    }
+  } else if (evt.type === 'book_end') {
+    const k = evt.id || evt.asin;
+    if (runState.current && runState.current.key === k) runState.current = null;
+  } else if (evt.type === 'run_start') {
+    if (!runState.running) runState.startedAt = new Date().toISOString();
+    runState.running = true;
+  } else if (evt.type === 'run_end') {
+    runState.running = false;
+    runState.endedAt = new Date().toISOString();
+    runState.current = null;
+  }
+}
+
 function broadcast(event) {
+  applyEventToRunState(event);
   const payload = `data: ${JSON.stringify(event)}\n\n`;
   for (const res of clients) {
     try { res.write(payload); } catch {}
@@ -50,18 +90,16 @@ function broadcast(event) {
   if (logBuffer.length > MAX_LOG_BUFFER) logBuffer.shift();
 }
 
-function safeFileName(s) {
+function safeFileNameKindle(s) {
   return s.replace(/[^a-z0-9_\-]+/gi, '_').slice(0, 80);
 }
 
-function loadConfig() {
+function loadKindleConfig() {
   if (!fs.existsSync(CONFIG_PATH)) return null;
-  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); }
-  catch { return null; }
+  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8')); } catch { return null; }
 }
 
-function loadStateFor(book) {
-  const fileBase = safeFileName(book.title || book.asin);
+function loadStateAt(fileBase) {
   const stateFile = path.join(OUTPUT_DIR, `${fileBase}.state.json`);
   const txtFile = path.join(OUTPUT_DIR, `${fileBase}.txt`);
   let state = null;
@@ -81,7 +119,7 @@ function loadStateFor(book) {
   };
 }
 
-function cookiesPresent() {
+function kindleCookiesPresent() {
   if (!fs.existsSync(COOKIES_PATH)) return false;
   try {
     const c = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
@@ -89,45 +127,68 @@ function cookiesPresent() {
   } catch { return false; }
 }
 
-// ----- API -----
+function buildBookList() {
+  const out = [];
+  let idx = 1;
 
-app.get('/api/status', (req, res) => {
-  const config = loadConfig();
-  if (!config) {
-    return res.json({
-      running: false, startedAt: null, endedAt: null, current: null,
-      cookiesPresent: cookiesPresent(),
-      settings: {}, books: []
-    });
+  const k = loadKindleConfig();
+  if (k && Array.isArray(k.books)) {
+    for (const b of k.books) {
+      const info = loadStateAt(safeFileNameKindle(b.title || b.asin));
+      let status = 'pending';
+      if (info.state && info.state.completed) status = 'completed';
+      else if (info.state && info.state.lastPage > 0) status = 'partial';
+      else if (info.hasFile) status = 'partial';
+      if (runState.running && runState.current
+          && runState.current.source === 'kindle'
+          && runState.current.key === b.asin) status = 'extracting';
+      out.push({
+        idx: idx++,
+        source: 'kindle',
+        key: b.asin,
+        asin: b.asin,
+        title: b.title,
+        author: b.author || '',
+        ...info,
+        status
+      });
+    }
   }
 
-  const books = config.books.map((b, i) => {
-    const info = loadStateFor(b);
+  // Google Books são descobertos a partir dos state.json em output/ —
+  // não tem mais scan prévio nem gbooks-config.json. Cada livro aparece
+  // quando o usuário inicia uma captura manual.
+  for (const b of gbooksManual.listExtractedBooks()) {
     let status = 'pending';
-    if (info.state && info.state.completed) status = 'completed';
-    else if (info.state && info.state.lastPage > 0) status = 'partial';
-    else if (info.hasFile) status = 'partial';
-    if (runState.running && runState.current && runState.current.asin === b.asin) status = 'extracting';
-    return {
-      idx: i + 1,
-      asin: b.asin,
-      title: b.title,
-      author: b.author || '',
-      ...info,
-      status
-    };
-  });
+    if (b.state && b.state.completed) status = 'completed';
+    else if (b.state && b.state.lastPage > 0) status = 'partial';
+    else if (b.hasFile) status = 'partial';
+    if (runState.running && runState.current
+        && runState.current.source === 'gbooks'
+        && runState.current.key === b.id) status = 'extracting';
+    out.push({ idx: idx++, ...b, status });
+  }
 
+  return out;
+}
+
+// ----- API: status -----
+
+app.get('/api/status', (req, res) => {
+  const books = buildBookList();
   res.json({
     running: runState.running,
     startedAt: runState.startedAt,
     endedAt: runState.endedAt,
     current: runState.current,
-    cookiesPresent: cookiesPresent(),
-    settings: config.settings,
+    queue: pendingQueue.map(q => ({ source: q.source, count: q.keys.length })),
+    cookies: { kindle: kindleCookiesPresent() },
+    cookiesPresent: kindleCookiesPresent(),
     books
   });
 });
+
+// ----- API: arquivos extraídos -----
 
 app.get('/api/file/:name', (req, res) => {
   const name = req.params.name;
@@ -157,84 +218,105 @@ app.get('/api/logs', (req, res) => {
   res.json({ logs: logBuffer.slice(-200) });
 });
 
-app.post('/api/start', (req, res) => {
-  if (runState.running) return res.status(400).json({ error: 'já está rodando' });
-  if (!fs.existsSync(CONFIG_PATH)) return res.status(400).json({ error: 'config.json ausente' });
+// ----- Orquestrador -----
 
-  const onlyAsins = Array.isArray(req.body?.asins) ? req.body.asins : null;
-  let configOverride = null;
-  if (onlyAsins && onlyAsins.length > 0) {
-    const base = loadConfig();
-    const filtered = base.books.filter(b => onlyAsins.includes(b.asin));
-    if (filtered.length === 0) return res.status(400).json({ error: 'nenhum ASIN encontrado' });
-    configOverride = { ...base, books: filtered };
-  }
+function spawnKindle(asins, onDone) {
+  const base = loadKindleConfig();
+  if (!base) { onDone(); return; }
+  const filtered = base.books.filter(b => asins.includes(b.asin));
+  if (filtered.length === 0) { onDone(); return; }
+  const cfg = { ...base, books: filtered };
+  const tmpConfig = path.join(ROOT, '.config.run.json');
+  fs.writeFileSync(tmpConfig, JSON.stringify(cfg, null, 2));
 
-  const env = { ...process.env, JSON_EVENTS: '1' };
-  let cmd = 'node';
-  let args = ['src/extract.js'];
-
-  let tmpConfig = null;
-  if (configOverride) {
-    tmpConfig = path.join(ROOT, '.config.run.json');
-    fs.writeFileSync(tmpConfig, JSON.stringify(configOverride, null, 2));
-    env.CONFIG_PATH = tmpConfig;
-  }
-
-  child = spawn(cmd, args, { cwd: ROOT, env });
-  runState.running = true;
-  runState.startedAt = new Date().toISOString();
-  runState.endedAt = null;
-  runState.current = null;
-  broadcast({ t: Date.now(), type: 'system', msg: 'Extração iniciada' });
+  const env = { ...process.env, JSON_EVENTS: '1', CONFIG_PATH: tmpConfig };
+  broadcast({ t: Date.now(), type: 'system', source: 'kindle', msg: `▶ Iniciando Kindle (${filtered.length} livros, headless)` });
+  child = spawn('node', ['src/extract.js'], { cwd: ROOT, env });
 
   const rl = readline.createInterface({ input: child.stdout });
   rl.on('line', line => {
     if (!line.trim()) return;
     let evt = null;
     try { evt = JSON.parse(line); } catch { evt = { t: Date.now(), type: 'log', msg: line }; }
-
-    if (evt.type === 'book_start' || evt.type === 'book_skip') {
-      runState.current = {
-        asin: evt.asin, title: evt.title, idx: evt.idx, total: evt.total,
-        page: evt.startFromPage || 0, totalChars: 0, rate: 0, preview: '',
-        file: evt.file || null,
-        startedAt: Date.now()
-      };
-    } else if (evt.type === 'page' && runState.current && runState.current.asin === evt.asin) {
-      runState.current.page = evt.page;
-      runState.current.totalChars = evt.totalChars;
-      runState.current.rate = evt.rate;
-      runState.current.preview = evt.preview;
-    } else if (evt.type === 'book_end') {
-      if (runState.current && runState.current.asin === evt.asin) runState.current = null;
-    }
-
+    if (!evt.source) evt.source = 'kindle';
     broadcast(evt);
   });
 
   child.stderr.on('data', d => {
-    broadcast({ t: Date.now(), type: 'stderr', msg: d.toString() });
+    broadcast({ t: Date.now(), type: 'stderr', source: 'kindle', msg: d.toString() });
   });
 
   child.on('exit', (code, signal) => {
+    broadcast({ t: Date.now(), type: 'system', source: 'kindle', msg: `Kindle finalizado (code=${code}, signal=${signal || 'null'})` });
+    try { if (fs.existsSync(tmpConfig)) fs.unlinkSync(tmpConfig); } catch {}
+    child = null;
+    onDone();
+  });
+}
+
+function runNext() {
+  if (pendingQueue.length === 0) {
     runState.running = false;
     runState.endedAt = new Date().toISOString();
     runState.current = null;
-    broadcast({ t: Date.now(), type: 'system', msg: `Processo finalizado (code=${code}, signal=${signal || 'null'})` });
-    child = null;
-    if (tmpConfig && fs.existsSync(tmpConfig)) {
-      try { fs.unlinkSync(tmpConfig); } catch {}
-    }
-  });
+    broadcast({ t: Date.now(), type: 'system', msg: '✓ Fila completa' });
+    return;
+  }
+  const item = pendingQueue.shift();
+  if (item.source === 'kindle') spawnKindle(item.keys, runNext);
+  else runNext(); // gbooks não roda em batch — só modo manual via CDP
+}
 
-  res.json({ ok: true });
+app.post('/api/start', (req, res) => {
+  if (runState.running) return res.status(400).json({ error: 'já está rodando' });
+
+  // Aceita: { keys: [{key,source}, ...] }  ou  { asins: [...] } (back-compat kindle)
+  // ou nada (= todos os pendentes)
+  const body = req.body || {};
+  const all = buildBookList();
+  let target = [];
+
+  if (Array.isArray(body.keys) && body.keys.length > 0) {
+    target = all.filter(b => body.keys.some(k => k.key === b.key && k.source === b.source));
+  } else if (Array.isArray(body.asins) && body.asins.length > 0) {
+    target = all.filter(b => b.source === 'kindle' && body.asins.includes(b.asin));
+  } else {
+    target = all.filter(b => b.status !== 'completed');
+  }
+
+  if (target.length === 0) return res.status(400).json({ error: 'nenhum livro pendente pra extrair' });
+
+  const kindleKeys = target.filter(b => b.source === 'kindle').map(b => b.asin);
+  const gbooksSkipped = target.filter(b => b.source === 'gbooks').length;
+
+  if (kindleKeys.length === 0) {
+    if (gbooksSkipped > 0) {
+      return res.status(400).json({ error: `${gbooksSkipped} livro(s) do Google Books — use o botão "Manual GBooks" pra extrair` });
+    }
+    return res.status(400).json({ error: 'nenhum livro Kindle pra extrair' });
+  }
+
+  pendingQueue = [];
+  pendingQueue.push({ source: 'kindle', keys: kindleKeys });
+
+  runState.running = true;
+  runState.startedAt = new Date().toISOString();
+  runState.endedAt = null;
+  runState.current = null;
+  const note = gbooksSkipped > 0 ? ` (${gbooksSkipped} GBooks pulados — use Manual GBooks)` : '';
+  broadcast({ t: Date.now(), type: 'system', msg: `▶ Iniciando ${kindleKeys.length} Kindle${note}` });
+  runNext();
+
+  res.json({ ok: true, kindle: kindleKeys.length, gbooksSkipped });
 });
 
 app.post('/api/stop', (req, res) => {
-  if (!child) return res.status(400).json({ error: 'nada rodando' });
-  child.kill('SIGTERM');
-  setTimeout(() => { if (child) try { child.kill('SIGKILL'); } catch {} }, 3000);
+  if (!child && pendingQueue.length === 0) return res.status(400).json({ error: 'nada rodando' });
+  pendingQueue = []; // cancela o que ainda não começou
+  if (child) {
+    child.kill('SIGTERM');
+    setTimeout(() => { if (child) try { child.kill('SIGKILL'); } catch {} }, 3000);
+  }
   res.json({ ok: true });
 });
 
@@ -246,11 +328,9 @@ app.get('/api/events', (req, res) => {
   res.flushHeaders?.();
 
   res.write(`: connected\n\n`);
-  // Send buffered recent events
   for (const ev of logBuffer.slice(-100)) {
     res.write(`data: ${JSON.stringify(ev)}\n\n`);
   }
-  // Send a snapshot event
   res.write(`data: ${JSON.stringify({ t: Date.now(), type: 'snapshot', running: runState.running, current: runState.current })}\n\n`);
 
   clients.add(res);
@@ -262,7 +342,7 @@ app.get('/api/events', (req, res) => {
   });
 });
 
-// ----- Cookies + login check -----
+// ----- Cookies Kindle -----
 
 function normalizeCookie(c) {
   return libNormalizeCookie(c);
@@ -273,16 +353,13 @@ app.post('/api/cookies', (req, res) => {
   if (typeof payload === 'string') {
     try { payload = JSON.parse(payload); } catch { return res.status(400).json({ error: 'JSON inválido' }); }
   }
-  // aceita tanto array direto quanto { cookies: [...] }
   const raw = Array.isArray(payload) ? payload : (Array.isArray(payload?.cookies) ? payload.cookies : null);
   if (!raw) return res.status(400).json({ error: 'esperado array de cookies' });
   if (raw.length === 0) return res.status(400).json({ error: 'array vazio' });
 
-  // valida campos mínimos
   const invalid = raw.find(c => !c.name || c.value === undefined || !c.domain);
   if (invalid) return res.status(400).json({ error: 'cookies devem ter name, value, domain' });
 
-  // verifica se tem ao menos um cookie de sessão Amazon
   const needed = ['at-main', 'sess-at-main', 'x-main', 'ubid-main', 'session-id'];
   const found = needed.filter(n => raw.some(c => c.name === n));
   if (found.length === 0) {
@@ -293,7 +370,6 @@ app.post('/api/cookies', (req, res) => {
 
   try {
     fs.writeFileSync(COOKIES_PATH, JSON.stringify(raw, null, 2));
-    // limpa sessão antiga para forçar uso dos cookies novos
     if (fs.existsSync(SESSION_DIR)) {
       try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch {}
     }
@@ -329,7 +405,6 @@ app.post('/api/check-login', async (req, res) => {
     const title = await page.title().catch(() => '');
     const isLogin = /signin|ap\/signin|login/i.test(url);
 
-    // tenta contar livros visíveis na biblioteca
     let books = 0;
     try {
       books = await page.evaluate(() => {
@@ -366,25 +441,50 @@ app.post('/api/wipe', (req, res) => {
   if (runState.running) {
     return res.status(409).json({ error: 'pare a extração antes de apagar tudo' });
   }
+  const source = (req.body && req.body.source) || 'kindle';
   const removed = [];
-  const targets = [
-    { name: 'cookies.json', path: COOKIES_PATH },
-    { name: 'config.json', path: CONFIG_PATH },
-    { name: '.config.run.json', path: path.join(ROOT, '.config.run.json') },
-    { name: 'output/', path: OUTPUT_DIR },
-    { name: 'tmp_ocr/', path: path.join(ROOT, 'tmp_ocr') },
-    { name: 'session/', path: SESSION_DIR },
-    { name: 'screenshots/', path: path.join(ROOT, 'screenshots') }
-  ];
+  let targets = [];
+
+  if (source === 'kindle' || source === 'all') {
+    targets.push(
+      { name: 'cookies.json', path: COOKIES_PATH },
+      { name: 'config.json', path: CONFIG_PATH },
+      { name: '.config.run.json', path: path.join(ROOT, '.config.run.json') },
+      { name: 'session/', path: SESSION_DIR }
+    );
+  }
+  if (source === 'gbooks' || source === 'all') {
+    targets.push(
+      { name: '.gbooks-chrome-debug/', path: path.join(ROOT, '.gbooks-chrome-debug') }
+    );
+  }
+  if (source === 'all') {
+    targets.push(
+      { name: 'output/', path: OUTPUT_DIR },
+      { name: 'tmp_ocr/', path: path.join(ROOT, 'tmp_ocr') },
+      { name: 'screenshots/', path: path.join(ROOT, 'screenshots') }
+    );
+  }
+
   for (const t of targets) {
     if (rmIfExists(t.path)) removed.push(t.name);
   }
-  // recria dirs vazios pra evitar problemas em runs futuros
+
+  // remove arquivos extraídos da fonte específica
+  try {
+    for (const f of fs.readdirSync(OUTPUT_DIR)) {
+      const isGbooks = f.startsWith('gbooks_');
+      if ((source === 'gbooks' && isGbooks) || (source === 'kindle' && !isGbooks)) {
+        try { fs.unlinkSync(path.join(OUTPUT_DIR, f)); removed.push('output/' + f); } catch {}
+      }
+    }
+  } catch {}
+
   for (const d of [OUTPUT_DIR, path.join(ROOT, 'tmp_ocr')]) {
     try { fs.mkdirSync(d, { recursive: true }); } catch {}
   }
-  logBuffer = [];
-  broadcast({ t: Date.now(), type: 'system', msg: `Wipe: ${removed.join(', ') || 'nada removido'}` });
+  if (source === 'all') logBuffer = [];
+  broadcast({ t: Date.now(), type: 'system', msg: `Wipe (${source}): ${removed.join(', ') || 'nada removido'}` });
   res.json({ ok: true, removed });
 });
 
@@ -396,48 +496,110 @@ app.post('/api/scan-library', async (req, res) => {
     return res.status(400).json({ error: 'cookies.json não existe — cole os cookies primeiro' });
   }
   scanRunning = true;
-  broadcast({ t: Date.now(), type: 'scan_progress', phase: 'starting', msg: 'Iniciando varredura da biblioteca' });
+  broadcast({ t: Date.now(), type: 'scan_progress', source: 'kindle', phase: 'starting', msg: 'Iniciando varredura da biblioteca' });
   try {
     const books = await scanLibrary({
       headless: true,
       onProgress: (p) => {
-        broadcast({ t: Date.now(), type: 'scan_progress', ...p });
+        broadcast({ t: Date.now(), type: 'scan_progress', source: 'kindle', ...p });
       }
     });
     if (books.length === 0) {
-      broadcast({ t: Date.now(), type: 'scan_progress', phase: 'empty', msg: 'Nenhum livro encontrado' });
+      broadcast({ t: Date.now(), type: 'scan_progress', source: 'kindle', phase: 'empty', msg: 'Nenhum livro encontrado' });
       return res.status(404).json({ error: 'nenhum livro encontrado na biblioteca' });
     }
     const merged = mergeIntoConfig(books);
     broadcast({
-      t: Date.now(), type: 'scan_done',
+      t: Date.now(), type: 'scan_done', source: 'kindle',
       total: merged.total, added: merged.added, scanned: merged.scanned
     });
     res.json({ ok: true, ...merged });
   } catch (e) {
-    broadcast({ t: Date.now(), type: 'scan_progress', phase: 'error', msg: e.message });
+    broadcast({ t: Date.now(), type: 'scan_progress', source: 'kindle', phase: 'error', msg: e.message });
     res.status(500).json({ error: e.message });
   } finally {
     scanRunning = false;
   }
 });
 
-app.post('/api/book/:asin/reset', (req, res) => {
-  const asin = req.params.asin;
-  if (!/^[A-Z0-9]{8,12}$/i.test(asin)) return res.status(400).json({ error: 'asin inválido' });
+// ----- Modo manual Google Books (CDP attach) -----
 
-  const config = loadConfig();
-  if (!config) return res.status(400).json({ error: 'config.json não encontrado' });
+app.get('/api/gbooks/manual/status', async (req, res) => {
+  try { res.json(await gbooksManual.status()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
 
-  const book = config.books.find(b => b.asin === asin);
-  if (!book) return res.status(404).json({ error: 'livro não está no config' });
+app.post('/api/gbooks/manual/launch-chrome', async (req, res) => {
+  try { res.json(await gbooksManual.launchChrome({ broadcast })); }
+  catch (e) {
+    broadcast({ t: Date.now(), type: 'gbooks_manual', msg: 'Erro launch: ' + e.message, err: true });
+    res.status(500).json({ error: e.message });
+  }
+});
 
-  // não permite resetar livro que está extraindo agora
-  if (runState.running && runState.current && runState.current.asin === asin) {
+app.post('/api/gbooks/manual/connect', async (req, res) => {
+  try { res.json(await gbooksManual.connect({ broadcast })); }
+  catch (e) {
+    broadcast({ t: Date.now(), type: 'gbooks_manual', msg: 'Erro connect: ' + e.message, err: true });
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/gbooks/manual/capture-current', async (req, res) => {
+  try {
+    const promise = gbooksManual.captureCurrent({ broadcast, settings: req.body || {} });
+    promise.catch(e => {
+      broadcast({ t: Date.now(), type: 'gbooks_manual', msg: 'Captura erro: ' + e.message, err: true });
+    });
+    res.json({ ok: true, started: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/gbooks/manual/capture-all', async (req, res) => {
+  try {
+    const promise = gbooksManual.captureAll({
+      broadcast,
+      settings: req.body || {},
+      skipCompleted: req.body?.skipCompleted !== false
+    });
+    promise.catch(e => {
+      broadcast({ t: Date.now(), type: 'gbooks_manual', msg: 'Capturar TODOS erro: ' + e.message, err: true });
+    });
+    res.json({ ok: true, started: true });
+  } catch (e) {
+    res.status(400).json({ error: e.message });
+  }
+});
+
+app.post('/api/gbooks/manual/abort', async (req, res) => {
+  res.json(await gbooksManual.abortCapture());
+});
+
+app.post('/api/gbooks/manual/disconnect', async (req, res) => {
+  res.json(await gbooksManual.disconnect());
+});
+
+app.post('/api/gbooks/manual/close-chrome', async (req, res) => {
+  res.json(await gbooksManual.closeChrome());
+});
+
+// ----- Reset de livro (qualquer fonte) -----
+
+app.post('/api/book/:key/reset', (req, res) => {
+  const key = req.params.key;
+  if (!/^[A-Za-z0-9_\-]{4,40}$/.test(key)) return res.status(400).json({ error: 'key inválida' });
+
+  const all = buildBookList();
+  const book = all.find(b => b.key === key);
+  if (!book) return res.status(404).json({ error: 'livro não encontrado' });
+
+  if (runState.running && runState.current && runState.current.key === key) {
     return res.status(409).json({ error: 'este livro está sendo extraído agora — pare a extração primeiro' });
   }
 
-  const fileBase = safeFileName(book.title || book.asin);
+  const fileBase = book.fileBase;
   const txtFile = path.join(OUTPUT_DIR, `${fileBase}.txt`);
   const stateFile = path.join(OUTPUT_DIR, `${fileBase}.state.json`);
   const removed = [];
@@ -457,12 +619,7 @@ function buildSetupStatus() {
   const items = {};
 
   const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
-  items.node = {
-    ok: nodeMajor >= 18,
-    version: process.version,
-    required: '>= 18.0.0'
-  };
-
+  items.node = { ok: nodeMajor >= 18, version: process.version, required: '>= 18.0.0' };
   items.playwright = { ok: hasPlaywright() };
   items.chromium = { ok: hasChromium() };
 
@@ -478,36 +635,39 @@ function buildSetupStatus() {
 
   if (tProbe.ok) {
     const langs = probeTesseractLangs(tesseractCmd);
-    items.tesseractPor = {
-      ok: langs.ok && langs.langs.includes('por'),
-      availableLangs: langs.langs
-    };
+    items.tesseractPor = { ok: langs.ok && langs.langs.includes('por'), availableLangs: langs.langs };
   } else {
     items.tesseractPor = { ok: false, availableLangs: [] };
   }
 
-  let cookiesValid = false;
+  const cProbe = probeChrome();
+  items.chrome = {
+    ok: cProbe.ok,
+    version: cProbe.version || null,
+    path: cProbe.path || null,
+    error: cProbe.ok ? null : cProbe.error,
+    optional: true // não bloqueia Kindle, só afeta Google Books DRM
+  };
+
+  let kindleCookiesValid = false;
   if (fs.existsSync(COOKIES_PATH)) {
     try {
       const c = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
-      cookiesValid = Array.isArray(c) && c.length > 0 &&
+      kindleCookiesValid = Array.isArray(c) && c.length > 0 &&
         ['at-main','sess-at-main','x-main','ubid-main','session-id'].some(n => c.some(x => x.name === n));
     } catch {}
   }
-  items.cookies = { ok: cookiesValid };
+  items.cookies = { ok: kindleCookiesValid };
 
-  let configValid = false;
-  let bookCount = 0;
+  let kindleBooks = 0;
   if (fs.existsSync(CONFIG_PATH)) {
     try {
       const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
-      configValid = Array.isArray(cfg.books) && cfg.books.length > 0;
-      bookCount = configValid ? cfg.books.length : 0;
+      kindleBooks = Array.isArray(cfg.books) ? cfg.books.length : 0;
     } catch {}
   }
-  items.config = { ok: configValid, bookCount };
+  items.config = { ok: kindleBooks > 0, bookCount: kindleBooks };
 
-  // anexa instruções por OS
   for (const key of Object.keys(items)) {
     if (!items[key].ok) {
       items[key].instructions = instructionsFor(key, plat);
@@ -515,92 +675,83 @@ function buildSetupStatus() {
   }
 
   const allOk = Object.values(items).every(it => it.ok);
-  // os 5 primeiros são "essenciais" pra rodar a extração
   const essentials = ['node', 'playwright', 'chromium', 'tesseract', 'tesseractPor'];
   const essentialsOk = essentials.every(k => items[k]?.ok);
   const missingCount = Object.values(items).filter(it => !it.ok).length;
 
-  return {
-    ok: allOk,
-    essentialsOk,
-    missingCount,
-    platform: plat,
-    items
-  };
+  return { ok: allOk, essentialsOk, missingCount, platform: plat, items };
 }
 
 app.get('/api/setup-status', (req, res) => {
   res.json(buildSetupStatus());
 });
 
-// ----- Setup: install + validate endpoints -----
-
 function streamProcessAsEvents(child, channel) {
   const rl = readline.createInterface({ input: child.stdout });
   rl.on('line', line => {
-    if (line.trim()) broadcast({ t: Date.now(), type: channel, msg: line });
+    if (line.trim()) {
+      process.stdout.write(`[${channel}] ${line}\n`);
+      broadcast({ t: Date.now(), type: channel, msg: line });
+    }
   });
+  // wget e apt costumam jogar progresso no stderr (linha-a-linha)
+  let errBuf = '';
   child.stderr.on('data', d => {
-    const s = d.toString();
-    if (s.trim()) broadcast({ t: Date.now(), type: channel, msg: s.trim(), err: true });
+    errBuf += d.toString();
+    // quebra por linha ou por \r (carriage return — usado por progress bars)
+    const parts = errBuf.split(/\r|\n/);
+    errBuf = parts.pop();
+    for (const p of parts) {
+      const s = p.trim();
+      if (!s) continue;
+      process.stdout.write(`[${channel}] ${s}\n`);
+      broadcast({ t: Date.now(), type: channel, msg: s, err: true });
+    }
+  });
+  child.on('exit', () => {
+    if (errBuf.trim()) {
+      process.stdout.write(`[${channel}] ${errBuf.trim()}\n`);
+      broadcast({ t: Date.now(), type: channel, msg: errBuf.trim(), err: true });
+    }
   });
 }
 
 let installInFlight = false;
-
 function runInstall(res, channel, cmd, args, opts = {}) {
-  if (installInFlight) {
-    return res.status(409).json({ error: 'outra instalação em andamento' });
-  }
+  if (installInFlight) return res.status(409).json({ error: 'outra instalação em andamento' });
   installInFlight = true;
   broadcast({ t: Date.now(), type: channel, msg: `$ ${cmd} ${args.join(' ')}`, start: true });
-  // No Windows, spawn de .cmd/.bat (npm, npx) precisa de shell: true desde a
-  // mitigação do CVE-2024-27980 — caso contrário falha com EINVAL.
   const spawnOpts = { cwd: ROOT, env: process.env, ...opts };
-  if (process.platform === 'win32' && spawnOpts.shell === undefined) {
-    spawnOpts.shell = true;
-  }
-  let child;
-  try {
-    child = spawn(cmd, args, spawnOpts);
-  } catch (e) {
+  if (process.platform === 'win32' && spawnOpts.shell === undefined) spawnOpts.shell = true;
+  let proc;
+  try { proc = spawn(cmd, args, spawnOpts); }
+  catch (e) {
     installInFlight = false;
     broadcast({ t: Date.now(), type: channel, msg: `erro: ${e.message}`, err: true, end: true });
     return res.status(500).json({ ok: false, error: e.message });
   }
-  streamProcessAsEvents(child, channel);
+  streamProcessAsEvents(proc, channel);
   let responded = false;
-  child.on('exit', (code) => {
+  proc.on('exit', (code) => {
     installInFlight = false;
     broadcast({ t: Date.now(), type: channel, msg: `(exit ${code})`, end: true, code });
-    if (!responded) {
-      responded = true;
-      res.json({ ok: code === 0, code });
-    }
+    if (!responded) { responded = true; res.json({ ok: code === 0, code }); }
   });
-  child.on('error', (e) => {
+  proc.on('error', (e) => {
     installInFlight = false;
     broadcast({ t: Date.now(), type: channel, msg: `erro: ${e.message}`, err: true, end: true });
-    if (!responded) {
-      responded = true;
-      res.status(500).json({ ok: false, error: e.message });
-    }
+    if (!responded) { responded = true; res.status(500).json({ ok: false, error: e.message }); }
   });
 }
 
 app.post('/api/setup/install-chromium', (req, res) => {
   runInstall(res, 'install_chromium', 'npx', ['playwright', 'install', 'chromium']);
 });
-
 app.post('/api/setup/install-deps', (req, res) => {
   runInstall(res, 'install_deps', 'npm', ['install', '--no-fund', '--no-audit']);
 });
-
 app.post('/api/setup/install-tesseract', (req, res) => {
-  if (process.platform !== 'linux') {
-    return res.status(400).json({ error: 'auto-install só disponível em Linux com apt-get' });
-  }
-  // Tenta sem sudo (caso esteja rodando como root); fallback pra sudo -n (non-interactive).
+  if (process.platform !== 'linux') return res.status(400).json({ error: 'auto-install só disponível em Linux com apt-get' });
   const isRoot = process.getuid && process.getuid() === 0;
   const cmd = isRoot ? 'apt-get' : 'sudo';
   const args = isRoot
@@ -608,11 +759,8 @@ app.post('/api/setup/install-tesseract', (req, res) => {
     : ['-n', 'apt-get', 'install', '-y', 'tesseract-ocr', 'tesseract-ocr-por'];
   runInstall(res, 'install_tesseract', cmd, args);
 });
-
 app.post('/api/setup/install-tesseract-por', (req, res) => {
-  if (process.platform !== 'linux') {
-    return res.status(400).json({ error: 'auto-install só disponível em Linux com apt-get' });
-  }
+  if (process.platform !== 'linux') return res.status(400).json({ error: 'auto-install só disponível em Linux com apt-get' });
   const isRoot = process.getuid && process.getuid() === 0;
   const cmd = isRoot ? 'apt-get' : 'sudo';
   const args = isRoot
@@ -621,36 +769,62 @@ app.post('/api/setup/install-tesseract-por', (req, res) => {
   runInstall(res, 'install_tesseract_por', cmd, args);
 });
 
-// Valida (e opcionalmente salva) um caminho custom pro tesseract — usado no Windows.
-app.post('/api/setup/tesseract-path', (req, res) => {
-  const { path: customPath, save } = req.body || {};
-  if (!customPath || typeof customPath !== 'string') {
-    return res.status(400).json({ error: 'campo "path" é obrigatório' });
+app.post('/api/setup/install-chrome', (req, res) => {
+  if (process.platform === 'linux') {
+    const debPath = '/tmp/google-chrome-stable_current_amd64.deb';
+    const isRoot = process.getuid && process.getuid() === 0;
+    // wget: --progress=dot:giga emite "10%, 20%..." em vez de barra ANSI.
+    // apt: -o Dpkg::Use-Pty=0 evita TTY que esconde output do spawn.
+    // sudo -n: se faltar sudoers config, falha imediato com mensagem clara.
+    const installer = isRoot ? 'apt' : 'sudo -n';
+    const shellCmd = [
+      `echo '▶ Baixando Chrome (.deb oficial, ~95MB)...'`,
+      `wget --progress=dot:giga -O ${debPath} https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb`,
+      `echo '▶ Instalando com apt (resolvendo dependências)...'`,
+      `${installer} apt -o Dpkg::Use-Pty=0 install -y ${debPath}`,
+      `echo '✓ Instalação concluída'`
+    ].join(' && ');
+    runInstall(res, 'install_chrome', 'bash', ['-c', shellCmd]);
+    return;
   }
-  const trimmed = customPath.trim().replace(/^["']|["']$/g, '');
-  if (!fs.existsSync(trimmed)) {
-    return res.status(400).json({ ok: false, error: `arquivo não encontrado: ${trimmed}` });
+  if (process.platform === 'darwin') {
+    runInstall(res, 'install_chrome', 'brew', ['install', '--cask', 'google-chrome']);
+    return;
   }
-  const probe = probeTesseract(trimmed);
-  if (!probe.ok) {
-    return res.status(400).json({ ok: false, error: `não consegui executar: ${probe.error}` });
-  }
-  let langs = { ok: false, langs: [] };
-  try { langs = probeTesseractLangs(trimmed); } catch {}
-
-  if (save) {
-    saveSetupLocal({ tesseractPath: trimmed });
-  }
-  res.json({
-    ok: true,
-    version: probe.version,
-    hasPor: langs.langs.includes('por'),
-    availableLangs: langs.langs,
-    saved: !!save
-  });
+  return res.status(400).json({ error: 'auto-install não disponível no Windows — baixe o instalador em https://www.google.com/chrome/' });
 });
 
-// Auto-detect tesseract no Windows: varre caminhos padrão e retorna o primeiro válido.
+app.post('/api/setup/chrome-detect', (req, res) => {
+  const p = findChrome();
+  if (!p) return res.json({ ok: false, found: false });
+  const probe = probeChrome(p);
+  res.json({ ok: probe.ok, found: true, path: p, version: probe.version, error: probe.error || null });
+});
+
+app.post('/api/setup/chrome-path', (req, res) => {
+  const { path: customPath, save } = req.body || {};
+  if (!customPath || typeof customPath !== 'string') return res.status(400).json({ error: 'campo "path" é obrigatório' });
+  const trimmed = customPath.trim().replace(/^["']|["']$/g, '');
+  if (!fs.existsSync(trimmed)) return res.status(400).json({ ok: false, error: `arquivo não encontrado: ${trimmed}` });
+  const probe = probeChrome(trimmed);
+  if (!probe.ok) return res.status(400).json({ ok: false, error: probe.error || 'não consegui executar' });
+  if (save) saveSetupLocal({ chromePath: trimmed });
+  res.json({ ok: true, version: probe.version, saved: !!save });
+});
+
+app.post('/api/setup/tesseract-path', (req, res) => {
+  const { path: customPath, save } = req.body || {};
+  if (!customPath || typeof customPath !== 'string') return res.status(400).json({ error: 'campo "path" é obrigatório' });
+  const trimmed = customPath.trim().replace(/^["']|["']$/g, '');
+  if (!fs.existsSync(trimmed)) return res.status(400).json({ ok: false, error: `arquivo não encontrado: ${trimmed}` });
+  const probe = probeTesseract(trimmed);
+  if (!probe.ok) return res.status(400).json({ ok: false, error: `não consegui executar: ${probe.error}` });
+  let langs = { ok: false, langs: [] };
+  try { langs = probeTesseractLangs(trimmed); } catch {}
+  if (save) saveSetupLocal({ tesseractPath: trimmed });
+  res.json({ ok: true, version: probe.version, hasPor: langs.langs.includes('por'), availableLangs: langs.langs, saved: !!save });
+});
+
 app.post('/api/setup/tesseract-detect', (req, res) => {
   const candidates = [
     'C:\\Program Files\\Tesseract-OCR\\tesseract.exe',
@@ -673,5 +847,5 @@ app.post('/api/setup/tesseract-detect', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Kindle Extract UI rodando em http://localhost:${PORT}`);
+  console.log(`Cloud Reader Extract UI rodando em http://localhost:${PORT}`);
 });

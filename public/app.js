@@ -6,15 +6,19 @@
     books: [],
     running: false,
     current: null,
-    selectedAsin: null,
+    selectedKey: null,
     activeTab: 'live',
     filter: 'all',
+    sourceFilter: 'all',
     searchQuery: '',
     readerFontSize: 18,
     logsPaused: false,
-    tailTimer: null
+    tailTimer: null,
+    scanActive: false,
+    cookies: { kindle: false }
   };
 
+  // ---- utils ----
   function fmtBytes(n) {
     if (!n) return '0 B';
     if (n < 1024) return `${n} B`;
@@ -31,21 +35,16 @@
     const d = new Date(ts);
     return d.toTimeString().slice(0, 8);
   }
-  function fmtRel(iso) {
-    if (!iso) return '—';
-    const d = new Date(iso);
-    if (Number.isNaN(+d)) return '—';
-    const diff = (Date.now() - d.getTime()) / 1000;
-    if (diff < 60) return 'agora há pouco';
-    if (diff < 3600) return `há ${Math.floor(diff/60)} min`;
-    if (diff < 86400) return `há ${Math.floor(diff/3600)} h`;
-    if (diff < 86400 * 7) return `há ${Math.floor(diff/86400)} dias`;
-    return d.toLocaleDateString('pt-BR');
-  }
   function countWords(text) {
     if (!text) return 0;
     return (text.trim().match(/\S+/g) || []).length;
   }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function srcLabel(s) { return s === 'gbooks' ? 'Google Books' : 'Kindle'; }
+  function srcBadge(s) { return s === 'gbooks' ? 'G' : 'K'; }
+  function idLabel(s) { return s === 'gbooks' ? 'ID' : 'ASIN'; }
 
   function toast(msg, type='info') {
     const el = $('#toast');
@@ -69,12 +68,14 @@
     return r.json();
   }
 
+  // ---- status ----
   async function loadStatus() {
     try {
       const data = await api('/api/status');
-      state.books = data.books;
+      state.books = data.books || [];
       state.running = data.running;
       state.current = data.current;
+      state.cookies = data.cookies || { kindle: !!data.cookiesPresent };
       renderTopStats(data);
       renderBookList();
       renderLive();
@@ -92,9 +93,10 @@
     const partial = data.books.filter(b => b.status === 'partial' || b.status === 'extracting').length;
     $('#stDone').textContent = done;
     $('#stPartial').textContent = partial;
-    $('#stCookies').textContent = data.cookiesPresent ? 'OK' : 'falta';
-    $('#stCookies').className = 'stat-val ' + (data.cookiesPresent ? 'ok' : 'err');
-    $('#btnCookies').classList.toggle('alert', !data.cookiesPresent);
+    const k = !!state.cookies.kindle;
+    $('#stCookiesK').textContent = k ? 'OK' : 'falta';
+    $('#stCookiesK').className = 'stat-val ' + (k ? 'ok' : 'err');
+    $('#btnCookies').classList.toggle('alert', !k);
   }
 
   function renderBookList() {
@@ -113,6 +115,7 @@
     $('#cntPending').textContent = counts.pending;
 
     const filtered = state.books.filter(b => {
+      if (state.sourceFilter !== 'all' && b.source !== state.sourceFilter) return false;
       if (state.filter === 'completed' && b.status !== 'completed') return false;
       if (state.filter === 'partial' && b.status !== 'partial' && b.status !== 'extracting') return false;
       if (state.filter === 'pending' && b.status !== 'pending') return false;
@@ -123,12 +126,14 @@
     list.innerHTML = '';
     for (const b of filtered) {
       const li = document.createElement('li');
-      li.className = 'book' + (state.selectedAsin === b.asin ? ' selected' : '');
-      li.dataset.asin = b.asin;
+      li.className = 'book' + (state.selectedKey === b.key ? ' selected' : '');
+      li.dataset.key = b.key;
       const sizeStr = b.txtSize ? fmtBytes(b.txtSize) : '';
       const canReset = b.hasFile || (b.state && b.state.lastPage > 0);
+      const badgeClass = 'book-source' + (b.source === 'gbooks' ? ' gb' : '');
       li.innerHTML = `
         <span class="book-status-dot ${b.status}"></span>
+        <span class="${badgeClass}" title="${escapeHtml(srcLabel(b.source))}">${srcBadge(b.source)}</span>
         <div class="book-info">
           <div class="book-title">${escapeHtml(b.title)}</div>
           <div class="book-author">${escapeHtml(b.author || '—')}</div>
@@ -143,18 +148,17 @@
           e.stopPropagation();
           confirmReset(b);
         } else {
-          selectBook(b.asin);
+          selectBook(b.key);
         }
       });
       list.appendChild(li);
     }
     if (!filtered.length) {
-      list.innerHTML = '<li style="padding:20px;text-align:center;color:var(--text-3);font-size:12px">nenhum livro nesse filtro</li>';
+      const msg = state.books.length === 0
+        ? 'cole os cookies (Kindle ou Google) pra importar livros'
+        : 'nenhum livro nesse filtro';
+      list.innerHTML = `<li style="padding:20px;text-align:center;color:var(--text-3);font-size:12px">${escapeHtml(msg)}</li>`;
     }
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
   function renderLive() {
@@ -162,15 +166,24 @@
     if (!live) {
       $('#liveEmpty').hidden = false;
       $('#liveBody').hidden = true;
+      $('#liveSource').hidden = true;
       return;
     }
     $('#liveEmpty').hidden = true;
     $('#liveBody').hidden = false;
 
     $('#nowCounter').textContent = live.idx && live.total ? `${live.idx}/${live.total}` : '';
-    $('#nowTitle').textContent = live.title || live.asin;
-    const book = state.books.find(b => b.asin === live.asin);
+    $('#nowTitle').textContent = live.title || live.key;
+    const book = state.books.find(b => b.key === live.key);
     $('#nowAuthor').textContent = book?.author || '';
+
+    if (live.source) {
+      $('#liveSource').hidden = false;
+      $('#liveSource').textContent = srcLabel(live.source);
+      $('#liveSource').className = 'live-source-chip' + (live.source === 'gbooks' ? ' gb' : '');
+    } else {
+      $('#liveSource').hidden = true;
+    }
 
     $('#mPage').textContent = fmtNum(live.page || 0);
     $('#mChars').textContent = fmtNum(live.totalChars || 0);
@@ -188,10 +201,10 @@
       $('#tailFileName').textContent = live.file;
       $('#btnOpenInReader').hidden = false;
       $('#btnOpenInReader').onclick = () => {
-        state.selectedAsin = live.asin;
+        state.selectedKey = live.key;
         switchTab('reader');
         renderBookList();
-        loadReader(live.asin);
+        loadReader(live.key);
       };
       scheduleTail(live.file);
     }
@@ -210,11 +223,11 @@
     state.tailTimer = setInterval(fetchTail, 2500);
   }
 
-  function selectBook(asin) {
-    state.selectedAsin = asin;
+  function selectBook(key) {
+    state.selectedKey = key;
     renderBookList();
     switchTab('reader');
-    loadReader(asin);
+    loadReader(key);
   }
 
   function statPill(label, val, mono = false) {
@@ -237,7 +250,7 @@
     $('#rTitle').textContent = b.title;
     $('#rAuthor').textContent = b.author ? `por ${b.author}` : '';
     $('#rAuthor').hidden = !b.author;
-    $('#rAsin').textContent = `ASIN ${b.asin}`;
+    $('#rAsin').textContent = `${srcLabel(b.source)} · ${idLabel(b.source)} ${b.key}`;
 
     const pages = b.state?.lastPage || 0;
     const totalChars = b.state?.totalChars || extra.size || 0;
@@ -254,8 +267,8 @@
     $('#rStats').hidden = pills.length === 0;
   }
 
-  async function loadReader(asin) {
-    const b = state.books.find(x => x.asin === asin);
+  async function loadReader(key) {
+    const b = state.books.find(x => x.key === key);
     if (!b) return;
 
     $('#readerEmpty').hidden = true;
@@ -272,9 +285,10 @@
           await api('/api/start', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ asins: [b.asin] })
+            body: JSON.stringify({ keys: [{ key: b.key, source: b.source }] })
           });
-          toast(`Extraindo "${b.title}"…`);
+          const note = b.source === 'gbooks' ? ' (browser visível)' : '';
+          toast(`Extraindo "${b.title}"…${note}`);
           switchTab('live');
         } catch (e) { toast('Erro: ' + e.message, 'err'); }
       };
@@ -312,14 +326,16 @@
     state.activeTab = name;
     $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     $$('.panel').forEach(p => p.hidden = p.dataset.panel !== name);
-    if (name === 'reader' && state.selectedAsin) loadReader(state.selectedAsin);
+    if (name === 'reader' && state.selectedKey) loadReader(state.selectedKey);
   }
 
   function appendLog(ev) {
     const logs = $('#logs');
     const line = document.createElement('div');
     line.className = 'log-line';
-    const msg = ev.msg || (ev.type === 'page' ? `pág ${ev.page} · ${fmtBytes(ev.totalChars)} · ${(ev.rate||0).toFixed(2)} pg/s` : ev.type === 'book_start' ? `★ ${ev.title || ev.asin}` : ev.type === 'book_end' ? (ev.completed ? `✓ ${fmtNum(ev.lastPage)} págs · ${fmtBytes(ev.totalChars)}` : `⚠ ${ev.abortReason || 'parado'}`) : JSON.stringify(ev));
+    const ident = ev.title || ev.id || ev.asin || '';
+    const srcTag = ev.source ? `[${ev.source === 'gbooks' ? 'G' : 'K'}] ` : '';
+    const msg = ev.msg || (ev.type === 'page' ? `${srcTag}pág ${ev.page} · ${fmtBytes(ev.totalChars)} · ${(ev.rate||0).toFixed(2)} pg/s` : ev.type === 'book_start' ? `${srcTag}★ ${ident}` : ev.type === 'book_end' ? `${srcTag}${ev.completed ? `✓ ${fmtNum(ev.lastPage)} págs · ${fmtBytes(ev.totalChars)}` : `⚠ ${ev.abortReason || 'parado'}`}` : JSON.stringify(ev));
     line.innerHTML = `
       <span class="log-time">${fmtHms(ev.t)}</span>
       <span class="log-type ${ev.type}">${ev.type}</span>
@@ -330,11 +346,15 @@
     if (!state.logsPaused) logs.scrollTop = logs.scrollHeight;
   }
 
+  function eventKey(ev) { return ev.id || ev.asin || ''; }
+
   function handleEvent(ev) {
     appendLog(ev);
+    const evKey = eventKey(ev);
     if (ev.type === 'book_start' || ev.type === 'book_skip') {
       state.current = {
-        asin: ev.asin, title: ev.title, idx: ev.idx, total: ev.total,
+        source: ev.source,
+        key: evKey, asin: ev.asin, id: ev.id, title: ev.title, idx: ev.idx, total: ev.total,
         page: ev.startFromPage || 0, totalChars: 0, rate: 0, preview: '',
         file: ev.file || null,
         startedAt: Date.now()
@@ -342,17 +362,16 @@
       state.running = true;
       loadStatus();
     } else if (ev.type === 'page') {
-      if (!state.current || state.current.asin !== ev.asin) return;
+      if (!state.current || state.current.key !== evKey) return;
       state.current.page = ev.page;
       state.current.totalChars = ev.totalChars;
       state.current.rate = ev.rate;
       state.current.preview = ev.preview;
       renderLive();
     } else if (ev.type === 'book_end') {
-      // pause briefly then refresh
       setTimeout(loadStatus, 400);
     } else if (ev.type === 'system') {
-      if (ev.msg && ev.msg.startsWith('Processo finalizado')) {
+      if (ev.msg && (ev.msg.includes('Fila completa') || ev.msg.startsWith('Processo finalizado'))) {
         state.running = false;
         state.current = null;
         loadStatus();
@@ -375,7 +394,11 @@
       }
     } else if (ev.type === 'scan_done') {
       if (state.scanActive) {
-        setCookieStatus(`✓ ${ev.total} livros no config.json (${ev.added} novos).`, 'ok');
+        setCookieStatus(`✓ ${ev.total} livros importados (${ev.added} novos).`, 'ok');
+      }
+    } else if (ev.type === 'browser_info') {
+      if (ev.usedChrome === false) {
+        toast('⚠ Chromium sem Widevine — livros DRM do Google Books vão falhar. Instale o Chrome.', 'err');
       }
     } else if (ev.type && ev.type.startsWith('install_')) {
       appendSetupConsole(ev.msg || '');
@@ -387,9 +410,7 @@
     es.onmessage = (e) => {
       try { handleEvent(JSON.parse(e.data)); } catch {}
     };
-    es.onerror = () => {
-      // reconexão automática do EventSource
-    };
+    es.onerror = () => {};
   }
 
   // ---- setup modal ----
@@ -399,10 +420,11 @@
     chromium: 'Chromium (Playwright)',
     tesseract: 'Tesseract OCR',
     tesseractPor: 'Idioma português (Tesseract)',
+    chrome: 'Google Chrome (pra Google Books — CDP manual)',
     cookies: 'Cookies do Kindle',
-    config: 'Lista de livros'
+    config: 'Lista de livros Kindle'
   };
-  const ITEM_ORDER = ['node', 'playwright', 'chromium', 'tesseract', 'tesseractPor', 'cookies', 'config'];
+  const ITEM_ORDER = ['node', 'playwright', 'chromium', 'tesseract', 'tesseractPor', 'chrome', 'cookies', 'config'];
 
   let setupAutoOpened = false;
   let setupStatusCache = null;
@@ -435,6 +457,8 @@
     else if (key === 'tesseract' && item.ok) detailLine = item.version || '';
     else if (key === 'tesseract' && !item.ok) detailLine = item.error ? `erro: ${item.error}` : 'não encontrado';
     else if (key === 'tesseractPor' && item.availableLangs?.length) detailLine = `idiomas: ${item.availableLangs.join(', ')}`;
+    else if (key === 'chrome' && item.ok) detailLine = item.version || item.path || '';
+    else if (key === 'chrome' && !item.ok) detailLine = 'não instalado — Kindle funciona sem isso';
     else if (key === 'config' && item.bookCount) detailLine = `${item.bookCount} livros`;
     else if (item.ok) detailLine = 'tudo certo';
     else detailLine = 'não configurado';
@@ -574,7 +598,6 @@
         summary.innerHTML = `✗ ${data.missingCount} item(ns) precisam ser resolvidos antes de extrair.`;
       }
 
-      // badge no botão
       $('#setupBadge').hidden = data.ok;
 
       if (autoOpenIfBroken && !data.essentialsOk && !setupAutoOpened) {
@@ -587,7 +610,6 @@
     }
   }
 
-  // delegação de eventos dentro do modal de setup
   $('#setupModal').addEventListener('click', async (e) => {
     const copyBtn = e.target.closest('.cmd-copy');
     if (copyBtn) {
@@ -610,11 +632,8 @@
       $('#setupConsoleLog').textContent = '';
       try {
         const r = await api(endpoint, { method: 'POST' });
-        if (r.ok) {
-          toast('Instalado com sucesso');
-        } else {
-          toast(`Instalação retornou código ${r.code}`, 'err');
-        }
+        if (r.ok) toast('Instalado com sucesso');
+        else toast(`Instalação retornou código ${r.code}`, 'err');
       } catch (err) {
         toast('Erro: ' + err.message, 'err');
       } finally {
@@ -635,7 +654,7 @@
           $('#tessPathStatus').textContent = `Detectado: ${r.candidates[0].version}`;
         } else {
           $('#tessPathStatus').className = 'modal-status show err';
-          $('#tessPathStatus').textContent = 'Nenhum tesseract encontrado nos caminhos padrão. Instale primeiro ou cole o caminho manualmente.';
+          $('#tessPathStatus').textContent = 'Nenhum tesseract encontrado nos caminhos padrão.';
         }
       } catch (err) {
         $('#tessPathStatus').className = 'modal-status show err';
@@ -713,19 +732,19 @@
   async function confirmReset(book) {
     confirmDialog(
       'Apagar conteúdo extraído?',
-      `Remove o .txt e o estado salvo de "${book.title}". O livro volta a aparecer como "não extraído" — nada começa automaticamente, você decide quando extrair de novo.`,
+      `Remove o .txt e o estado salvo de "${book.title}" (${srcLabel(book.source)}). Nada começa automaticamente.`,
       async () => {
         try {
-          const r = await api(`/api/book/${book.asin}/reset`, { method: 'POST' });
+          const r = await api(`/api/book/${encodeURIComponent(book.key)}/reset`, { method: 'POST' });
           toast(`Removido: ${r.removed.join(', ') || '(nada)'}`);
           await loadStatus();
-          if (state.selectedAsin === book.asin) loadReader(book.asin);
+          if (state.selectedKey === book.key) loadReader(book.key);
         } catch (e) { toast('Erro: ' + e.message, 'err'); }
       }
     );
   }
 
-  // ---- cookies modal ----
+  // ---- cookies modal (só Kindle) ----
   $('#btnCookies').addEventListener('click', () => {
     $('#cookiesStatus').className = 'modal-status';
     $('#cookiesStatus').textContent = '';
@@ -762,7 +781,7 @@
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(cookies)
       });
-      setCookieStatus('<span class="loader"></span> Testando login (pode levar 10s)…', 'info');
+      setCookieStatus('<span class="loader"></span> Testando login…', 'info');
       const r = await api('/api/check-login', { method: 'POST' });
       if (!r.ok) {
         setCookieStatus(`✗ ${r.error || 'falhou'}. URL final: <code>${escapeHtml(r.url || '')}</code>`, 'err');
@@ -793,13 +812,16 @@
   $('#btnWipeAll').addEventListener('click', () => {
     confirmDialog(
       'Apagar tudo?',
-      'Isso remove cookies, lista de livros, todos os textos já extraídos, screenshots e a sessão do Chromium. Não dá pra desfazer. Continuar?',
+      'Remove cookies, lista de livros e textos extraídos de AMBAS as fontes (Kindle + Google Books). Não dá pra desfazer.',
       async () => {
         try {
-          const r = await api('/api/wipe', { method: 'POST' });
-          toast(`Apagado: ${r.removed.join(', ') || 'nada'}`);
+          const r = await api('/api/wipe', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source: 'all' })
+          });
+          toast(`Apagado: ${r.removed.length ? r.removed.length + ' item(ns)' : 'nada'}`);
           $('#cookiesInput').value = '';
-          state.selectedAsin = null;
+          state.selectedKey = null;
           $('#readerEmpty').hidden = false;
           $('#readerBody').hidden = true;
           await loadStatus();
@@ -809,16 +831,151 @@
   });
 
   $('#btnReset').addEventListener('click', () => {
-    if (!state.selectedAsin) return;
-    const b = state.books.find(x => x.asin === state.selectedAsin);
+    if (!state.selectedKey) return;
+    const b = state.books.find(x => x.key === state.selectedKey);
     if (b) confirmReset(b);
   });
 
-  // ---- handlers ----
+  // ---- modo manual Google Books (CDP attach) ----
+  async function refreshManualState() {
+    try {
+      const s = await api('/api/gbooks/manual/status');
+      const el = $('#manualState');
+      const cap = s.capturing;
+      const lines = [];
+
+      if (!s.chromeRunning && !s.portOpen) {
+        lines.push('<span>nenhum Chrome em modo debug</span>');
+      } else if (s.portOpen && !s.connected) {
+        lines.push(`<span class="ms-ok">✓ Chrome em :9222 ouvindo</span> — clique <b>Conectar</b>`);
+      } else if (s.connected) {
+        lines.push(`<span class="ms-ok">✓ Conectado via CDP</span> · ${s.pageCount} aba(s)`);
+        lines.push(`URL: <code>${escapeHtml(s.currentUrl || '(vazio)')}</code>`);
+        if (s.onReader) {
+          lines.push(`<span class="ms-ok">✓ aba no reader</span> · ID: <code>${escapeHtml(s.bookId || '?')}</code>`);
+        } else {
+          lines.push('<span class="ms-warn">⚠ nenhuma aba no reader — navegue até o livro no Chrome</span>');
+        }
+        if (cap) lines.push('<span class="ms-warn">⏳ capturando…</span>');
+      }
+      el.innerHTML = lines.map(l => `<div>${l}</div>`).join('');
+
+      $('#manualLaunch').disabled = s.chromeRunning || s.portOpen;
+      $('#manualLaunch').textContent = (s.chromeRunning || s.portOpen) ? '1· Chrome aberto' : '1· Abrir Chrome';
+      $('#manualConnect').disabled = !s.portOpen || s.connected;
+      $('#manualConnect').textContent = s.connected ? '2· Conectado' : '2· Conectar';
+      $('#manualCapture').disabled = !s.connected || !s.onReader || cap;
+      $('#manualCaptureAll').disabled = !s.connected || cap;
+      $('#manualAbort').hidden = !cap;
+      $('#manualCloseChrome').disabled = !s.chromeRunning && !s.portOpen;
+    } catch (e) {
+      $('#manualState').textContent = 'erro: ' + e.message;
+    }
+  }
+
+  let manualStatusTimer = null;
+  function startManualPolling() {
+    refreshManualState();
+    if (manualStatusTimer) clearInterval(manualStatusTimer);
+    manualStatusTimer = setInterval(refreshManualState, 2000);
+  }
+  function stopManualPolling() {
+    if (manualStatusTimer) { clearInterval(manualStatusTimer); manualStatusTimer = null; }
+  }
+
+  $('#btnManual').addEventListener('click', () => {
+    openModal('manualModal');
+    startManualPolling();
+  });
+  $('#manualClose').addEventListener('click', () => {
+    closeModal('manualModal');
+    stopManualPolling();
+  });
+
+  $('#manualLaunch').addEventListener('click', async () => {
+    $('#manualLaunch').disabled = true;
+    $('#manualLaunch').textContent = 'abrindo…';
+    try {
+      await api('/api/gbooks/manual/launch-chrome', { method: 'POST' });
+      toast('Chrome aberto — logue no Google nessa janela');
+      refreshManualState();
+    } catch (e) {
+      toast('Erro: ' + e.message, 'err');
+      refreshManualState();
+    }
+  });
+
+  $('#manualConnect').addEventListener('click', async () => {
+    $('#manualConnect').disabled = true;
+    $('#manualConnect').textContent = 'conectando…';
+    try {
+      await api('/api/gbooks/manual/connect', { method: 'POST' });
+      toast('Conectado — navegue até o livro no Chrome');
+      refreshManualState();
+    } catch (e) {
+      toast('Erro: ' + e.message, 'err');
+      refreshManualState();
+    }
+  });
+
+  $('#manualCapture').addEventListener('click', async () => {
+    $('#manualCapture').disabled = true;
+    try {
+      await api('/api/gbooks/manual/capture-current', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}'
+      });
+      toast('Captura iniciada — acompanhe na aba "Ao vivo"');
+      closeModal('manualModal');
+      stopManualPolling();
+      switchTab('live');
+    } catch (e) {
+      toast('Erro: ' + e.message, 'err');
+      $('#manualCapture').disabled = false;
+    }
+  });
+
+  $('#manualCaptureAll').addEventListener('click', async () => {
+    if (!confirm('Capturar TODOS os livros da biblioteca?\n\nVai listar a biblioteca, entrar em cada livro, ir pra primeira página e capturar tudo. Pode demorar horas. Livros já completos são pulados. Você pode parar com "Abortar captura".\n\nIMPORTANTE: deixa a janela do Chrome visível e não mexe nela enquanto roda.')) return;
+    $('#manualCaptureAll').disabled = true;
+    try {
+      await api('/api/gbooks/manual/capture-all', {
+        method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}'
+      });
+      toast('Capturar TODOS iniciado — acompanhe na aba "Ao vivo"');
+      closeModal('manualModal');
+      stopManualPolling();
+      switchTab('live');
+    } catch (e) {
+      toast('Erro: ' + e.message, 'err');
+      $('#manualCaptureAll').disabled = false;
+    }
+  });
+
+  $('#manualAbort').addEventListener('click', async () => {
+    if (!confirm('Abortar captura atual?')) return;
+    try {
+      await api('/api/gbooks/manual/abort', { method: 'POST' });
+      toast('Abortando…');
+    } catch (e) { toast('Erro: ' + e.message, 'err'); }
+  });
+
+  $('#manualCloseChrome').addEventListener('click', async () => {
+    if (!confirm('Fechar Chrome e encerrar sessão?')) return;
+    try {
+      await api('/api/gbooks/manual/close-chrome', { method: 'POST' });
+      toast('Chrome fechado');
+      refreshManualState();
+    } catch (e) { toast('Erro: ' + e.message, 'err'); }
+  });
+
+  // ---- start/stop ----
   $('#btnStart').addEventListener('click', async () => {
     try {
-      await api('/api/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-      toast('Extração iniciada');
+      const r = await api('/api/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+      const parts = [];
+      if (r.kindle) parts.push(`${r.kindle} Kindle`);
+      if (r.gbooks) parts.push(`${r.gbooks} Google Books (browser visível)`);
+      toast(parts.length ? `Fila: ${parts.join(' + ')}` : 'Extração iniciada');
     } catch (e) { toast('Erro: ' + e.message, 'err'); }
   });
 
@@ -857,6 +1014,6 @@
   // ---- init ----
   loadStatus();
   connectSSE();
-  loadSetupStatus(true); // auto-abre modal se faltar algo essencial
-  setInterval(loadStatus, 6000); // refresh sizes etc
+  loadSetupStatus(true);
+  setInterval(loadStatus, 6000);
 })();

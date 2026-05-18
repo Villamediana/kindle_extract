@@ -80,6 +80,104 @@ code { font-size: 0.85em; padding: 1px 5px; background: var(--bg-3); border-radi
 .stat-val.err { color: var(--err); }
 
 .topbar-actions { display: flex; gap: 8px; }
+
+.cookies-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-3);
+  cursor: pointer;
+}
+.cookies-toggle input { accent-color: var(--accent); }
+
+.manual-state {
+  padding: 10px 12px;
+  margin: 12px 0;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.6;
+}
+.manual-state .ms-ok { color: var(--ok); }
+.manual-state .ms-warn { color: var(--warn); }
+.manual-state code { font-size: 11px; }
+
+/* tabs internas do modal de cookies */
+.cookies-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 22px;
+  border-bottom: 1px solid var(--line);
+}
+.cookies-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px 11px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-3);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: all 0.15s ease;
+}
+.cookies-tab:hover { color: var(--text-2); }
+.cookies-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.ct-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px; height: 20px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+}
+.ct-badge.gb { background: rgba(130,168,212,0.18); color: var(--info); }
+.ct-state { font-size: 11px; color: var(--text-3); margin-left: 4px; }
+.ct-state.ok { color: var(--ok); }
+.ct-state.err { color: var(--err); }
+
+/* source badge nos livros da sidebar */
+.book-source {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px; height: 18px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.book-source.gb { background: rgba(130,168,212,0.18); color: var(--info); }
+
+/* current-source chip no live view */
+.live-source-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  letter-spacing: 0.3px;
+  margin-left: 8px;
+}
+.live-source-chip.gb { background: rgba(130,168,212,0.18); color: var(--info); }
 .btn {
   display: inline-flex; align-items: center; gap: 8px;
   padding: 8px 14px; border-radius: var(--radius-sm);
