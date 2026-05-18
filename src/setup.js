@@ -62,6 +62,7 @@ let needsInstall = !nodeModulesExists;
 if (!needsInstall) {
   try { require.resolve('express', { paths: [ROOT] }); } catch { needsInstall = true; }
   try { require.resolve('playwright', { paths: [ROOT] }); } catch { needsInstall = true; }
+  try { require.resolve('sharp', { paths: [ROOT] }); } catch { needsInstall = true; }
 }
 if (needsInstall) {
   warn('node_modules/ incompleto — rodando npm install…');
@@ -69,7 +70,34 @@ if (needsInstall) {
   if (r.status === 0) ok('npm install concluído');
   else { fail('npm install falhou'); failures++; }
 } else {
-  ok('node_modules/ presente (express, playwright)');
+  ok('node_modules/ presente (express, playwright, sharp)');
+}
+
+// Sharp tem binário nativo por plataforma. Se o node_modules veio de outra
+// máquina (ex: OneDrive sincronizando Linux→Windows), o require quebra com
+// "Could not load the sharp module using the <plat> runtime". Detecta e
+// reinstala explicitando a plataforma atual.
+step('Verificando binário nativo do sharp');
+try {
+  require(require.resolve('sharp', { paths: [ROOT] }));
+  ok(`sharp carregado para ${process.platform}-${process.arch}`);
+} catch (e) {
+  const isPlatformMismatch = /Could not load the .* module using the .* runtime/.test(e.message);
+  if (isPlatformMismatch) {
+    warn(`sharp não tem binário para ${process.platform}-${process.arch} — reinstalando…`);
+  } else {
+    warn(`sharp não carrega: ${e.message.split('\n')[0]} — reinstalando…`);
+  }
+  const r = sh('npm', [
+    'install',
+    '--include=optional',
+    `--os=${process.platform}`,
+    `--cpu=${process.arch}`,
+    '--no-fund', '--no-audit',
+    'sharp'
+  ], { cwd: ROOT });
+  if (r.status === 0) ok('sharp reinstalado para a plataforma atual');
+  else { fail('falha ao reinstalar sharp — rode manualmente: npm install --include=optional sharp'); failures++; }
 }
 
 // ---------- 3. Playwright Chromium ----------

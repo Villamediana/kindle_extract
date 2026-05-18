@@ -19,6 +19,7 @@ const net = require('net');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const sharp = require('sharp');
 const { cleanText } = require('./clean');
 const { resolveTesseractCmd, findChrome } = require('./setup-helpers');
 const TESSERACT_CMD = resolveTesseractCmd();
@@ -70,11 +71,38 @@ async function waitForPort(port, timeoutMs = 8000) {
   return false;
 }
 
-function ocrPNG(pngPath, lang = 'por', timeoutMs = 45000) {
+// Upscale 2x lanczos antes do OCR — Tesseract performa muito melhor com input
+// equivalente a ~300 DPI; viewports do Chrome são tipicamente ~96 DPI.
+async function preprocessForOCR(pngPath) {
+  const upscaledPath = pngPath.replace(/\.png$/, '.up.png');
+  const meta = await sharp(pngPath).metadata();
+  await sharp(pngPath)
+    .resize({ width: meta.width * 2, kernel: sharp.kernel.lanczos3 })
+    .grayscale()
+    .normalise()
+    .png({ compressionLevel: 1 })
+    .toFile(upscaledPath);
+  try { fs.unlinkSync(pngPath); } catch {}
+  return upscaledPath;
+}
+
+async function ocrPNG(pngPath, lang = 'por', timeoutMs = 45000) {
+  let inputPath = pngPath;
+  try {
+    inputPath = await preprocessForOCR(pngPath);
+  } catch (e) {
+    // Se sharp falhar, segue com a PNG original.
+  }
   return new Promise((resolve) => {
-    const base = pngPath.replace(/\.png$/, '');
-    const proc = spawn(TESSERACT_CMD, [pngPath, base, '-l', lang, '--psm', '3', '--oem', '1'],
-      { stdio: ['ignore', 'ignore', 'pipe'] });
+    const base = inputPath.replace(/\.png$/, '');
+    const proc = spawn(TESSERACT_CMD, [
+      inputPath, base,
+      '-l', lang,
+      '--psm', '6',
+      '--oem', '1',
+      '-c', 'user_defined_dpi=300',
+      '-c', 'preserve_interword_spaces=1'
+    ], { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     proc.stderr.on('data', d => { stderr += d.toString(); });
     const killer = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, timeoutMs);
@@ -83,7 +111,7 @@ function ocrPNG(pngPath, lang = 'por', timeoutMs = 45000) {
       const txtPath = base + '.txt';
       let text = '';
       try { text = fs.readFileSync(txtPath, 'utf-8'); } catch {}
-      try { fs.unlinkSync(pngPath); } catch {}
+      try { fs.unlinkSync(inputPath); } catch {}
       try { fs.unlinkSync(txtPath); } catch {}
       if (code !== 0) return resolve({ ok: false, text: '', error: stderr.slice(0, 200) });
       resolve({ ok: true, text });
@@ -166,7 +194,8 @@ async function launchChrome({ broadcast } = {}) {
     `--remote-debugging-port=${DEBUG_PORT}`,
     `--user-data-dir=${CHROME_DEBUG_DIR}`,
     '--no-first-run',
-    '--no-default-browser-check'
+    '--no-default-browser-check',
+    'https://play.google.com/books'
   ], { detached: false, stdio: 'ignore' });
 
   chromeProcess.on('exit', (code) => {
