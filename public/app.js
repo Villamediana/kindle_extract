@@ -377,6 +377,8 @@
       if (state.scanActive) {
         setCookieStatus(`✓ ${ev.total} livros no config.json (${ev.added} novos).`, 'ok');
       }
+    } else if (ev.type && ev.type.startsWith('install_')) {
+      appendSetupConsole(ev.msg || '');
     }
   }
 
@@ -389,6 +391,298 @@
       // reconexão automática do EventSource
     };
   }
+
+  // ---- setup modal ----
+  const ITEM_LABELS = {
+    node: 'Node.js',
+    playwright: 'Dependências npm',
+    chromium: 'Chromium (Playwright)',
+    tesseract: 'Tesseract OCR',
+    tesseractPor: 'Idioma português (Tesseract)',
+    cookies: 'Cookies do Kindle',
+    config: 'Lista de livros'
+  };
+  const ITEM_ORDER = ['node', 'playwright', 'chromium', 'tesseract', 'tesseractPor', 'cookies', 'config'];
+
+  let setupAutoOpened = false;
+  let setupStatusCache = null;
+
+  function appendSetupConsole(line) {
+    const c = $('#setupConsole');
+    const log = $('#setupConsoleLog');
+    c.hidden = false;
+    c.open = true;
+    log.textContent += line + '\n';
+    log.scrollTop = log.scrollHeight;
+  }
+
+  function setupPlatformChip(plat) {
+    const el = $('#setupPlatform');
+    const map = { linux: 'Linux', mac: 'macOS', windows: 'Windows' };
+    el.textContent = map[plat] || plat;
+    el.dataset.plat = plat;
+  }
+
+  function renderSetupItem(key, item) {
+    const label = ITEM_LABELS[key] || key;
+    const li = document.createElement('li');
+    li.className = 'setup-item ' + (item.ok ? 'ok' : 'missing');
+    li.dataset.key = key;
+
+    const status = item.ok ? '✓' : '✗';
+    let detailLine = '';
+    if (key === 'node') detailLine = `${item.version} (precisa ${item.required})`;
+    else if (key === 'tesseract' && item.ok) detailLine = item.version || '';
+    else if (key === 'tesseract' && !item.ok) detailLine = item.error ? `erro: ${item.error}` : 'não encontrado';
+    else if (key === 'tesseractPor' && item.availableLangs?.length) detailLine = `idiomas: ${item.availableLangs.join(', ')}`;
+    else if (key === 'config' && item.bookCount) detailLine = `${item.bookCount} livros`;
+    else if (item.ok) detailLine = 'tudo certo';
+    else detailLine = 'não configurado';
+
+    li.innerHTML = `
+      <div class="setup-item-head">
+        <span class="setup-status ${item.ok ? 'ok' : 'missing'}">${status}</span>
+        <div class="setup-item-text">
+          <div class="setup-item-title">${escapeHtml(label)}</div>
+          <div class="setup-item-detail">${escapeHtml(detailLine)}</div>
+        </div>
+      </div>
+      <div class="setup-item-body"></div>
+    `;
+
+    const body = li.querySelector('.setup-item-body');
+    if (!item.ok && item.instructions) {
+      body.appendChild(renderInstructions(key, item));
+    }
+    return li;
+  }
+
+  function renderInstructions(key, item) {
+    const ins = item.instructions;
+    const wrap = document.createElement('div');
+    wrap.className = 'instructions';
+
+    if (ins.title) {
+      const h = document.createElement('div');
+      h.className = 'instructions-title';
+      h.textContent = ins.title;
+      wrap.appendChild(h);
+    }
+
+    if (ins.steps && ins.steps.length) {
+      const ol = document.createElement('ol');
+      ol.className = 'instructions-steps';
+      for (const s of ins.steps) {
+        const li = document.createElement('li');
+        li.textContent = s;
+        ol.appendChild(li);
+      }
+      wrap.appendChild(ol);
+    }
+
+    if (ins.download) {
+      const a = document.createElement('a');
+      a.href = ins.download;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.className = 'btn-link instructions-download';
+      a.textContent = `Abrir página de download →`;
+      wrap.appendChild(a);
+    }
+
+    if (ins.commands && ins.commands.length) {
+      const block = document.createElement('div');
+      block.className = 'instructions-commands';
+      for (const c of ins.commands) {
+        const row = document.createElement('div');
+        row.className = 'cmd-row';
+        row.innerHTML = `<code>${escapeHtml(c)}</code><button class="cmd-copy" data-cmd="${escapeHtml(c)}">copiar</button>`;
+        block.appendChild(row);
+      }
+      wrap.appendChild(block);
+    }
+
+    if (ins.showPathInput) {
+      const input = document.createElement('div');
+      input.className = 'tesseract-path-block';
+      const local = setupStatusCache?.items?.tesseract?.customPath || '';
+      input.innerHTML = `
+        <div class="path-row">
+          <input type="text" id="tessPathInput" placeholder="C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
+                 value="${escapeHtml(local)}" autocomplete="off">
+          <button id="tessDetect" class="btn">Detectar</button>
+          <button id="tessValidate" class="btn btn-primary">Validar &amp; salvar</button>
+        </div>
+        <div id="tessPathStatus" class="modal-status"></div>
+      `;
+      wrap.appendChild(input);
+    }
+
+    if (ins.autoInstall) {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-primary install-now';
+      btn.dataset.endpoint = ins.autoInstall.endpoint;
+      btn.textContent = ins.autoInstall.label || 'Instalar agora';
+      wrap.appendChild(btn);
+    }
+
+    if (ins.openCookiesModal) {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-primary';
+      btn.textContent = 'Abrir importação de cookies';
+      btn.onclick = () => {
+        closeModal('setupModal');
+        $('#cookiesStatus').className = 'modal-status';
+        $('#cookiesStatus').textContent = '';
+        openModal('cookiesModal');
+      };
+      wrap.appendChild(btn);
+    }
+
+    if (ins.note) {
+      const n = document.createElement('div');
+      n.className = 'instructions-note';
+      n.textContent = ins.note;
+      wrap.appendChild(n);
+    }
+
+    return wrap;
+  }
+
+  async function loadSetupStatus(autoOpenIfBroken = false) {
+    try {
+      const data = await api('/api/setup-status');
+      setupStatusCache = data;
+      setupPlatformChip(data.platform);
+
+      const ul = $('#setupChecklist');
+      ul.innerHTML = '';
+      for (const key of ITEM_ORDER) {
+        if (!data.items[key]) continue;
+        ul.appendChild(renderSetupItem(key, data.items[key]));
+      }
+
+      const summary = $('#setupSummary');
+      if (data.ok) {
+        summary.className = 'setup-summary ok';
+        summary.innerHTML = '✓ Tudo pronto. Você pode iniciar a extração.';
+      } else if (data.essentialsOk) {
+        summary.className = 'setup-summary warn';
+        summary.innerHTML = `⚠ ${data.missingCount} item(ns) opcionais faltando — você pode usar o sistema, mas configure cookies/biblioteca pra rodar.`;
+      } else {
+        summary.className = 'setup-summary err';
+        summary.innerHTML = `✗ ${data.missingCount} item(ns) precisam ser resolvidos antes de extrair.`;
+      }
+
+      // badge no botão
+      $('#setupBadge').hidden = data.ok;
+
+      if (autoOpenIfBroken && !data.essentialsOk && !setupAutoOpened) {
+        setupAutoOpened = true;
+        openModal('setupModal');
+      }
+      return data;
+    } catch (e) {
+      toast('Falha ao checar setup: ' + e.message, 'err');
+    }
+  }
+
+  // delegação de eventos dentro do modal de setup
+  $('#setupModal').addEventListener('click', async (e) => {
+    const copyBtn = e.target.closest('.cmd-copy');
+    if (copyBtn) {
+      const cmd = copyBtn.dataset.cmd;
+      try {
+        await navigator.clipboard.writeText(cmd);
+        copyBtn.textContent = 'copiado ✓';
+        setTimeout(() => { copyBtn.textContent = 'copiar'; }, 1500);
+      } catch { toast('falha ao copiar', 'err'); }
+      return;
+    }
+
+    const installBtn = e.target.closest('.install-now');
+    if (installBtn) {
+      const endpoint = installBtn.dataset.endpoint;
+      installBtn.disabled = true;
+      installBtn.textContent = 'instalando…';
+      $('#setupConsole').hidden = false;
+      $('#setupConsole').open = true;
+      $('#setupConsoleLog').textContent = '';
+      try {
+        const r = await api(endpoint, { method: 'POST' });
+        if (r.ok) {
+          toast('Instalado com sucesso');
+        } else {
+          toast(`Instalação retornou código ${r.code}`, 'err');
+        }
+      } catch (err) {
+        toast('Erro: ' + err.message, 'err');
+      } finally {
+        installBtn.disabled = false;
+        loadSetupStatus(false);
+      }
+      return;
+    }
+
+    if (e.target.id === 'tessDetect') {
+      e.target.disabled = true;
+      try {
+        const r = await api('/api/setup/tesseract-detect', { method: 'POST' });
+        if (r.candidates && r.candidates.length) {
+          const inp = $('#tessPathInput');
+          inp.value = r.candidates[0].path;
+          $('#tessPathStatus').className = 'modal-status show info';
+          $('#tessPathStatus').textContent = `Detectado: ${r.candidates[0].version}`;
+        } else {
+          $('#tessPathStatus').className = 'modal-status show err';
+          $('#tessPathStatus').textContent = 'Nenhum tesseract encontrado nos caminhos padrão. Instale primeiro ou cole o caminho manualmente.';
+        }
+      } catch (err) {
+        $('#tessPathStatus').className = 'modal-status show err';
+        $('#tessPathStatus').textContent = 'Erro: ' + err.message;
+      } finally {
+        e.target.disabled = false;
+      }
+      return;
+    }
+
+    if (e.target.id === 'tessValidate') {
+      const p = $('#tessPathInput').value.trim();
+      if (!p) {
+        $('#tessPathStatus').className = 'modal-status show err';
+        $('#tessPathStatus').textContent = 'Cole o caminho antes';
+        return;
+      }
+      e.target.disabled = true;
+      $('#tessPathStatus').className = 'modal-status show info';
+      $('#tessPathStatus').innerHTML = '<span class="loader"></span> validando…';
+      try {
+        const r = await api('/api/setup/tesseract-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: p, save: true })
+        });
+        const porMsg = r.hasPor ? 'idioma "por" OK' : '⚠ idioma "por" não encontrado — reinstale o Tesseract incluindo o pacote português';
+        $('#tessPathStatus').className = 'modal-status show ' + (r.hasPor ? 'ok' : 'warn');
+        $('#tessPathStatus').textContent = `✓ Salvo: ${r.version}. ${porMsg}`;
+        toast('Caminho do tesseract salvo');
+        setTimeout(() => loadSetupStatus(false), 500);
+      } catch (err) {
+        $('#tessPathStatus').className = 'modal-status show err';
+        $('#tessPathStatus').textContent = '✗ ' + err.message;
+      } finally {
+        e.target.disabled = false;
+      }
+    }
+  });
+
+  $('#btnSetup').addEventListener('click', () => {
+    openModal('setupModal');
+    loadSetupStatus(false);
+  });
+  $('#setupClose').addEventListener('click', () => closeModal('setupModal'));
+  $('#setupDone').addEventListener('click', () => closeModal('setupModal'));
+  $('#setupRecheck').addEventListener('click', () => loadSetupStatus(false));
 
   // ---- modais ----
   function openModal(id) {
@@ -563,5 +857,6 @@
   // ---- init ----
   loadStatus();
   connectSSE();
+  loadSetupStatus(true); // auto-abre modal se faltar algo essencial
   setInterval(loadStatus, 6000); // refresh sizes etc
 })();

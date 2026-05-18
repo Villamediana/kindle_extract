@@ -29,6 +29,14 @@
       <div class="stat"><span class="stat-label">Cookies</span><span class="stat-val" id="stCookies">—</span></div>
     </div>
     <div class="topbar-actions">
+      <button id="btnSetup" class="btn" title="Verificar dependências do sistema">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>
+          <circle cx="12" cy="12" r="4"/>
+        </svg>
+        Setup
+        <span id="setupBadge" class="badge-dot" hidden></span>
+      </button>
       <button id="btnCookies" class="btn" title="Configurar cookies do Kindle">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8">
           <path d="M12 3a9 9 0 1 0 9 9 4 4 0 0 1-4-4 4 4 0 0 1-4-4 1 1 0 0 0-1-1z"/>
@@ -51,6 +59,34 @@
       </button>
     </div>
   </header>
+
+  <!-- Modal de setup / verificação -->
+  <div id="setupModal" class="modal" hidden>
+    <div class="modal-backdrop"></div>
+    <div class="modal-card modal-card-lg">
+      <header class="modal-head">
+        <h2>Verificação do ambiente</h2>
+        <div class="modal-head-actions">
+          <span id="setupPlatform" class="platform-chip">—</span>
+          <button class="modal-close" id="setupClose" aria-label="fechar">×</button>
+        </div>
+      </header>
+      <div class="modal-body">
+        <div id="setupSummary" class="setup-summary">
+          <span class="loader"></span> verificando…
+        </div>
+        <ul id="setupChecklist" class="setup-list"></ul>
+        <details id="setupConsole" class="setup-console" hidden>
+          <summary>Console de instalação</summary>
+          <pre id="setupConsoleLog"></pre>
+        </details>
+      </div>
+      <footer class="modal-foot">
+        <button id="setupRecheck" class="btn">Re-verificar</button>
+        <button id="setupDone" class="btn btn-primary">Fechar</button>
+      </footer>
+    </div>
+  </div>
 
   <!-- Modal de cookies -->
   <div id="cookiesModal" class="modal" hidden>

@@ -42,22 +42,25 @@ Estado de cada livro é salvo em `output/<titulo>.state.json` a cada página, en
 
 ## Quickstart
 
+**Tudo que você precisa rodar:**
+
 ```bash
 git clone https://github.com/Villamediana/kindle_extract && cd kindle_extract
 npm install
-npm run setup       # checa/instala node, playwright, tesseract+pt, dirs
-npm run server      # sobe UI em http://SEU_SERVIDOR:3400
+npm run server
 ```
 
-`npm run setup` é idempotente — ele audita o ambiente e instala só o que falta:
+Pronto. Abra `http://localhost:3400` no browser e **o resto é UI** — não precisa editar arquivo, não precisa rodar setup separado, não precisa lembrar de comando nenhum.
 
-- Node 18+
-- Dependências do `package.json`
-- Chromium do Playwright
-- Tesseract + pacote de idioma português (via `apt` em Debian/Ubuntu)
-- Diretórios de trabalho (`output/`, `tmp_ocr/`, `session/`, …)
+Na primeira vez, se faltar Chromium, Tesseract, idioma português, cookies ou a lista de livros, **uma modal de Setup abre sozinha** com um checklist e te guia passo a passo:
 
-No primeiro `apt-get` ele pede `sudo`.
+- **Linux**: clica em **"Instalar agora"** e o UI roda `npm install`, `npx playwright install chromium` e `apt-get install tesseract-ocr tesseract-ocr-por` direto (com stream do log num console no próprio modal).
+- **macOS**: o UI mostra o comando do Homebrew pronto pra copiar com um clique.
+- **Windows**: o UI mostra o link do instalador do Tesseract, e na linha do Tesseract aparece um **campo pra colar o caminho do `tesseract.exe`** com botões **Detectar** (varre `C:\Program Files\Tesseract-OCR\` e outros caminhos padrão) e **Validar & salvar** (testa `--version`, confere se o idioma `por` está instalado, persiste em `setup.local.json`).
+
+Os mesmos cookies/biblioteca também são importados pela UI — você nunca precisa abrir um terminal depois do `npm run server`.
+
+> Se preferir CLI, `npm run setup` audita o ambiente e tenta instalar via apt no Linux. Mas não é necessário.
 
 ---
 
@@ -179,9 +182,10 @@ kindle_extract/
 
 **"Cookies não autenticaram"** — sessão expirou ou exportou do domínio errado. Reexporte os cookies (precisa estar logado no momento da exportação) e cole de novo.
 
-**"Tesseract não instalado"** — `npm run setup` resolve via `apt-get` em Debian/Ubuntu. Em outros OS:
+**"Tesseract não instalado"** — abra o UI e use a modal de Setup. Ela tenta instalar via apt-get no Linux; em outros OS, mostra o comando ou (no Windows) um campo pra colar o caminho do `tesseract.exe`:
 - macOS: `brew install tesseract tesseract-lang`
 - Fedora: `sudo dnf install tesseract tesseract-langpack-por`
+- Windows: instalador do [UB-Mannheim](https://github.com/UB-Mannheim/tesseract/wiki) + validar caminho no UI
 
 **OCR lento (>15s/página)** — provavelmente a imagem está muito grande. O default `--psm 3 --oem 1 -l por` é o que dá melhor relação custo/qualidade.
 

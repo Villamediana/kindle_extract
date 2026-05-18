@@ -4,6 +4,17 @@ const fs = require('fs');
 const { spawn, spawnSync } = require('child_process');
 const readline = require('readline');
 const { scanLibrary, mergeIntoConfig, normalizeCookie: libNormalizeCookie } = require('./library');
+const {
+  platform: hostPlatform,
+  loadSetupLocal,
+  saveSetupLocal,
+  resolveTesseractCmd,
+  probeTesseract,
+  probeTesseractLangs,
+  hasChromium,
+  hasPlaywright,
+  instructionsFor
+} = require('./setup-helpers');
 
 const ROOT = path.join(__dirname, '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
@@ -440,45 +451,214 @@ app.post('/api/book/:asin/reset', (req, res) => {
 
 // ----- Setup status (saúde do ambiente) -----
 
+function buildSetupStatus() {
+  const plat = hostPlatform();
+  const local = loadSetupLocal();
+  const items = {};
+
+  const nodeMajor = parseInt(process.versions.node.split('.')[0], 10);
+  items.node = {
+    ok: nodeMajor >= 18,
+    version: process.version,
+    required: '>= 18.0.0'
+  };
+
+  items.playwright = { ok: hasPlaywright() };
+  items.chromium = { ok: hasChromium() };
+
+  const tesseractCmd = resolveTesseractCmd();
+  const tProbe = probeTesseract(tesseractCmd);
+  items.tesseract = {
+    ok: tProbe.ok,
+    version: tProbe.version || null,
+    error: tProbe.ok ? null : tProbe.error,
+    cmd: tesseractCmd,
+    customPath: local.tesseractPath || null
+  };
+
+  if (tProbe.ok) {
+    const langs = probeTesseractLangs(tesseractCmd);
+    items.tesseractPor = {
+      ok: langs.ok && langs.langs.includes('por'),
+      availableLangs: langs.langs
+    };
+  } else {
+    items.tesseractPor = { ok: false, availableLangs: [] };
+  }
+
+  let cookiesValid = false;
+  if (fs.existsSync(COOKIES_PATH)) {
+    try {
+      const c = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
+      cookiesValid = Array.isArray(c) && c.length > 0 &&
+        ['at-main','sess-at-main','x-main','ubid-main','session-id'].some(n => c.some(x => x.name === n));
+    } catch {}
+  }
+  items.cookies = { ok: cookiesValid };
+
+  let configValid = false;
+  let bookCount = 0;
+  if (fs.existsSync(CONFIG_PATH)) {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf-8'));
+      configValid = Array.isArray(cfg.books) && cfg.books.length > 0;
+      bookCount = configValid ? cfg.books.length : 0;
+    } catch {}
+  }
+  items.config = { ok: configValid, bookCount };
+
+  // anexa instruções por OS
+  for (const key of Object.keys(items)) {
+    if (!items[key].ok) {
+      items[key].instructions = instructionsFor(key, plat);
+    }
+  }
+
+  const allOk = Object.values(items).every(it => it.ok);
+  // os 5 primeiros são "essenciais" pra rodar a extração
+  const essentials = ['node', 'playwright', 'chromium', 'tesseract', 'tesseractPor'];
+  const essentialsOk = essentials.every(k => items[k]?.ok);
+  const missingCount = Object.values(items).filter(it => !it.ok).length;
+
+  return {
+    ok: allOk,
+    essentialsOk,
+    missingCount,
+    platform: plat,
+    items
+  };
+}
+
 app.get('/api/setup-status', (req, res) => {
-  const result = { ok: true, items: {} };
+  res.json(buildSetupStatus());
+});
 
-  // node
-  result.items.node = { ok: true, version: process.version };
+// ----- Setup: install + validate endpoints -----
 
-  // express + playwright instalados
-  try { require.resolve('playwright'); result.items.playwright = { ok: true }; }
-  catch { result.items.playwright = { ok: false }; result.ok = false; }
+function streamProcessAsEvents(child, channel) {
+  const rl = readline.createInterface({ input: child.stdout });
+  rl.on('line', line => {
+    if (line.trim()) broadcast({ t: Date.now(), type: channel, msg: line });
+  });
+  child.stderr.on('data', d => {
+    const s = d.toString();
+    if (s.trim()) broadcast({ t: Date.now(), type: channel, msg: s.trim(), err: true });
+  });
+}
 
-  // chromium baixado
-  try {
-    const cacheDir = path.join(process.env.HOME || '/root', '.cache', 'ms-playwright');
-    const hasChromium = fs.existsSync(cacheDir) && fs.readdirSync(cacheDir).some(d => d.startsWith('chromium'));
-    result.items.chromium = { ok: hasChromium };
-    if (!hasChromium) result.ok = false;
-  } catch { result.items.chromium = { ok: false }; result.ok = false; }
+let installInFlight = false;
 
-  // tesseract
-  try {
-    const r = spawnSync('tesseract', ['--version'], { encoding: 'utf-8' });
-    result.items.tesseract = { ok: r.status === 0, version: (r.stdout || r.stderr || '').split('\n')[0] };
-    if (r.status !== 0) result.ok = false;
-  } catch { result.items.tesseract = { ok: false }; result.ok = false; }
+function runInstall(res, channel, cmd, args, opts = {}) {
+  if (installInFlight) {
+    return res.status(409).json({ error: 'outra instalação em andamento' });
+  }
+  installInFlight = true;
+  broadcast({ t: Date.now(), type: channel, msg: `$ ${cmd} ${args.join(' ')}`, start: true });
+  const child = spawn(cmd, args, { cwd: ROOT, env: process.env, ...opts });
+  streamProcessAsEvents(child, channel);
+  let responded = false;
+  child.on('exit', (code) => {
+    installInFlight = false;
+    broadcast({ t: Date.now(), type: channel, msg: `(exit ${code})`, end: true, code });
+    if (!responded) {
+      responded = true;
+      res.json({ ok: code === 0, code });
+    }
+  });
+  child.on('error', (e) => {
+    installInFlight = false;
+    broadcast({ t: Date.now(), type: channel, msg: `erro: ${e.message}`, err: true, end: true });
+    if (!responded) {
+      responded = true;
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+}
 
-  // por language
-  try {
-    const r = spawnSync('tesseract', ['--list-langs'], { encoding: 'utf-8' });
-    const langs = (r.stdout + r.stderr).split('\n').map(s => s.trim());
-    result.items.tesseractPor = { ok: langs.includes('por') };
-    if (!langs.includes('por')) result.ok = false;
-  } catch { result.items.tesseractPor = { ok: false }; result.ok = false; }
+app.post('/api/setup/install-chromium', (req, res) => {
+  const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  runInstall(res, 'install_chromium', npx, ['playwright', 'install', 'chromium']);
+});
 
-  // cookies
-  result.items.cookies = { ok: fs.existsSync(COOKIES_PATH) };
-  // config
-  result.items.config = { ok: fs.existsSync(CONFIG_PATH) };
+app.post('/api/setup/install-deps', (req, res) => {
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  runInstall(res, 'install_deps', npm, ['install', '--no-fund', '--no-audit']);
+});
 
-  res.json(result);
+app.post('/api/setup/install-tesseract', (req, res) => {
+  if (process.platform !== 'linux') {
+    return res.status(400).json({ error: 'auto-install só disponível em Linux com apt-get' });
+  }
+  // Tenta sem sudo (caso esteja rodando como root); fallback pra sudo -n (non-interactive).
+  const isRoot = process.getuid && process.getuid() === 0;
+  const cmd = isRoot ? 'apt-get' : 'sudo';
+  const args = isRoot
+    ? ['install', '-y', 'tesseract-ocr', 'tesseract-ocr-por']
+    : ['-n', 'apt-get', 'install', '-y', 'tesseract-ocr', 'tesseract-ocr-por'];
+  runInstall(res, 'install_tesseract', cmd, args);
+});
+
+app.post('/api/setup/install-tesseract-por', (req, res) => {
+  if (process.platform !== 'linux') {
+    return res.status(400).json({ error: 'auto-install só disponível em Linux com apt-get' });
+  }
+  const isRoot = process.getuid && process.getuid() === 0;
+  const cmd = isRoot ? 'apt-get' : 'sudo';
+  const args = isRoot
+    ? ['install', '-y', 'tesseract-ocr-por']
+    : ['-n', 'apt-get', 'install', '-y', 'tesseract-ocr-por'];
+  runInstall(res, 'install_tesseract_por', cmd, args);
+});
+
+// Valida (e opcionalmente salva) um caminho custom pro tesseract — usado no Windows.
+app.post('/api/setup/tesseract-path', (req, res) => {
+  const { path: customPath, save } = req.body || {};
+  if (!customPath || typeof customPath !== 'string') {
+    return res.status(400).json({ error: 'campo "path" é obrigatório' });
+  }
+  const trimmed = customPath.trim().replace(/^["']|["']$/g, '');
+  if (!fs.existsSync(trimmed)) {
+    return res.status(400).json({ ok: false, error: `arquivo não encontrado: ${trimmed}` });
+  }
+  const probe = probeTesseract(trimmed);
+  if (!probe.ok) {
+    return res.status(400).json({ ok: false, error: `não consegui executar: ${probe.error}` });
+  }
+  let langs = { ok: false, langs: [] };
+  try { langs = probeTesseractLangs(trimmed); } catch {}
+
+  if (save) {
+    saveSetupLocal({ tesseractPath: trimmed });
+  }
+  res.json({
+    ok: true,
+    version: probe.version,
+    hasPor: langs.langs.includes('por'),
+    availableLangs: langs.langs,
+    saved: !!save
+  });
+});
+
+// Auto-detect tesseract no Windows: varre caminhos padrão e retorna o primeiro válido.
+app.post('/api/setup/tesseract-detect', (req, res) => {
+  const candidates = [
+    'C:\\Program Files\\Tesseract-OCR\\tesseract.exe',
+    'C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe',
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Tesseract-OCR', 'tesseract.exe'),
+    path.join(process.env.USERPROFILE || '', 'AppData', 'Local', 'Programs', 'Tesseract-OCR', 'tesseract.exe'),
+    '/usr/bin/tesseract',
+    '/usr/local/bin/tesseract',
+    '/opt/homebrew/bin/tesseract'
+  ].filter(Boolean);
+
+  const found = [];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      const p = probeTesseract(c);
+      if (p.ok) found.push({ path: c, version: p.version });
+    }
+  }
+  res.json({ ok: found.length > 0, candidates: found });
 });
 
 app.listen(PORT, () => {

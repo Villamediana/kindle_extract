@@ -4,6 +4,9 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { cleanText } = require('./clean');
+const { resolveTesseractCmd } = require('./setup-helpers');
+
+const TESSERACT_CMD = resolveTesseractCmd();
 
 const ROOT = path.join(__dirname, '..');
 const SESSION_DIR = path.join(ROOT, 'session');
@@ -151,7 +154,7 @@ async function capturePagePNG(page) {
 function ocrPNG(pngPath, lang = 'por', timeoutMs = 45000) {
   return new Promise((resolve) => {
     const base = pngPath.replace(/\.png$/, '');
-    const proc = spawn('tesseract', [pngPath, base, '-l', lang, '--psm', '3', '--oem', '1'],
+    const proc = spawn(TESSERACT_CMD, [pngPath, base, '-l', lang, '--psm', '3', '--oem', '1'],
       { stdio: ['ignore', 'ignore', 'pipe'] });
     let stderr = '';
     proc.stderr.on('data', d => { stderr += d.toString(); });

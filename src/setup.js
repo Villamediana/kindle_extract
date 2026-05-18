@@ -15,10 +15,12 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { resolveTesseractCmd, platform: hostPlatform } = require('./setup-helpers');
 
 const ROOT = path.join(__dirname, '..');
 const COOKIES_PATH = path.join(ROOT, 'cookies.json');
 const CONFIG_PATH = path.join(ROOT, 'config.json');
+const TESSERACT_CMD = resolveTesseractCmd();
 
 // ANSI cores
 const C = {
@@ -90,11 +92,12 @@ if (hasChromium) {
 
 // ---------- 4. Tesseract ----------
 step('Verificando Tesseract OCR');
-const tessVer = shq('tesseract', ['--version']);
+info(`Binário: ${TESSERACT_CMD}`);
+const tessVer = shq(TESSERACT_CMD, ['--version']);
 const hasTesseract = tessVer.status === 0;
 if (hasTesseract) {
   ok(`Tesseract: ${(tessVer.stdout || tessVer.stderr).split('\n')[0]}`);
-} else {
+} else if (hostPlatform() === 'linux') {
   warn('Tesseract não instalado — tentando instalar via apt…');
   const apt = shq('which', ['apt-get']);
   if (apt.status === 0) {
@@ -107,15 +110,24 @@ if (hasTesseract) {
     }
   } else {
     fail('apt-get não disponível. Instale Tesseract manualmente para seu OS:');
-    console.log(`     ${C.dim}macOS: brew install tesseract tesseract-lang${C.reset}`);
     console.log(`     ${C.dim}Fedora: sudo dnf install tesseract tesseract-langpack-por${C.reset}`);
     failures++;
   }
+} else if (hostPlatform() === 'mac') {
+  fail('Tesseract não encontrado. No macOS, instale via Homebrew:');
+  console.log(`     ${C.dim}brew install tesseract tesseract-lang${C.reset}`);
+  failures++;
+} else {
+  fail('Tesseract não encontrado. No Windows:');
+  console.log(`     ${C.dim}1) Baixe o instalador em https://github.com/UB-Mannheim/tesseract/wiki${C.reset}`);
+  console.log(`     ${C.dim}2) Durante a instalação, marque "Additional language data → Portuguese"${C.reset}`);
+  console.log(`     ${C.dim}3) Abra o UI (npm run server) e cole o caminho do tesseract.exe na aba de Setup${C.reset}`);
+  failures++;
 }
 
 // ---------- 5. Tesseract Portuguese ----------
 step('Verificando pacote de idioma português do Tesseract');
-const tessLangs = shq('tesseract', ['--list-langs']);
+const tessLangs = shq(TESSERACT_CMD, ['--list-langs']);
 if (tessLangs.status === 0) {
   const all = (tessLangs.stdout + tessLangs.stderr).split('\n').map(s => s.trim());
   if (all.includes('por')) {
