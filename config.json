@@ -1,0 +1,99 @@
+{
+  "books": [
+    {
+      "asin": "B0752YNT7M",
+      "title": "O peso da glória (Clássicos C. S. Lewis) (Portuguese Edition)",
+      "author": "Lewis, C. S."
+    },
+    {
+      "asin": "B001I45UF2",
+      "title": "The Magician's Nephew (The Chronicles of Narnia Book 1)",
+      "author": "Lewis, C.S."
+    },
+    {
+      "asin": "B082YGMNRZ",
+      "title": "Minuto da gratidão: O desafio dos 90 dias que mudará a sua vida (Portuguese Edition)",
+      "author": "Luz, Marcia"
+    },
+    {
+      "asin": "B07Y8X4GCL",
+      "title": "A equação do milagre (Portuguese Edition)",
+      "author": "Elrod, Hal"
+    },
+    {
+      "asin": "B00OICLVBI",
+      "title": "The 5 Love Languages®: The Secret to Love that Lasts",
+      "author": "Chapman, Gary"
+    },
+    {
+      "asin": "B0BYKTTC5Q",
+      "title": "O pequeno príncipe: (Tradução do francês corrigida e atualizada) (Portuguese Edition)",
+      "author": "de Saint-Exupéry, Antoine"
+    },
+    {
+      "asin": "B09C6D8D9Q",
+      "title": "Pense de novo: O poder de saber o que você não sabe (Portuguese Edition)",
+      "author": "Grant, Adam"
+    },
+    {
+      "asin": "B07V8LHWZ5",
+      "title": "Hábitos Atômicos: Um Método Fácil e Comprovado de Criar Bons Hábitos e Se Livrar dos Maus. (Portuguese Edition)",
+      "author": "Clear, James"
+    },
+    {
+      "asin": "B09421JM7S",
+      "title": "Perfeitamente inadequado (Portuguese Edition)",
+      "author": "Lessa, Thays"
+    },
+    {
+      "asin": "B01N40AB2U",
+      "title": "Mentes depressivas (Portuguese Edition)",
+      "author": "Silva, Dra. Ana Beatriz Barbosa"
+    },
+    {
+      "asin": "B0CFSJ6YMD",
+      "title": "Uma boa vida: Como viver com mais significado e realização (Portuguese Edition)",
+      "author": "Schulz, Marc; Waldinger, Robert"
+    },
+    {
+      "asin": "B07QPC8RZX",
+      "title": "Data Science from Scratch: First Principles with Python",
+      "author": "Grus, Joel"
+    },
+    {
+      "asin": "B08FXSMLN4",
+      "title": "Em busca do tempo presente: Vivendo a espiritualidade em sua vida diária (Portuguese Edition)",
+      "author": "Tannier, Kankyo"
+    },
+    {
+      "asin": "B0752X3H64",
+      "title": "Cartas de um diabo a seu aprendiz (Clássicos C. S. Lewis) (Portuguese Edition)",
+      "author": "Lewis, C. S."
+    },
+    {
+      "asin": "B01LZ5YOY1",
+      "title": "O milagre da manhã (Portuguese Edition)",
+      "author": "Elrod, Hal"
+    },
+    {
+      "asin": "B08WBXHFBL",
+      "title": "A psicologia financeira: lições atemporais sobre fortuna, ganância e felicidade (Portuguese Edition)",
+      "author": "Housel, Morgan"
+    },
+    {
+      "asin": "B00AQI6C6M",
+      "title": "O Alquimista (Portuguese Edition)",
+      "author": "Coelho, Paulo"
+    },
+    {
+      "asin": "B001I45UFC",
+      "title": "The Lion, the Witch and the Wardrobe: Classic Fantasy Tale for Kids (The Chronicles of Narnia Book 2)",
+      "author": "Lewis, C.S."
+    }
+  ],
+  "settings": {
+    "pageDelayMs": 1500,
+    "screenshotEachPage": false,
+    "headless": true
+  }
+}
