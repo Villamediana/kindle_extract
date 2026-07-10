@@ -11,3 +11,5 @@ server.log
 .env
 *.log
 tessdata/
+pdfs/
+excluded.json

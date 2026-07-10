@@ -121,10 +121,19 @@
     list.innerHTML = '';
     for (const b of filtered) {
       const li = document.createElement('li');
-      li.className = 'book' + (state.selectedKey === b.key ? ' selected' : '');
+      li.className = 'book'
+        + (state.selectedKey === b.key ? ' selected' : '')
+        + (b.excluded ? ' excluded' : '');
       li.dataset.key = b.key;
       const sizeStr = b.txtSize ? fmtBytes(b.txtSize) : '';
       const canReset = b.hasFile || (b.state && b.state.lastPage > 0);
+      const exTitle = b.excluded
+        ? 'Incluir de novo na extração em massa'
+        : 'Pular este livro na extração em massa';
+      // Eye icon for "incluído" (visível), eye-off for "excluído".
+      const exIcon = b.excluded
+        ? '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 3l18 18"/><path d="M10.6 6.1A9 9 0 0 1 12 6c5.4 0 9 6 9 6a14 14 0 0 1-2.7 3.5"/><path d="M6.7 7.4A14 14 0 0 0 3 12s3.6 6 9 6a9 9 0 0 0 3.5-.7"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>'
+        : '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
       li.innerHTML = `
         <span class="book-status-dot ${b.status}"></span>
         <div class="book-info">
@@ -132,6 +141,7 @@
           <div class="book-author">${escapeHtml(b.author || '—')}</div>
         </div>
         <div class="book-actions">
+          <button class="book-action-btn" data-action="toggle-excluded" title="${exTitle}">${exIcon}</button>
           ${canReset ? `<button class="book-action-btn" data-action="reset" title="Apagar progresso">⟳</button>` : ''}
         </div>
         <div class="book-size">${sizeStr}</div>
@@ -140,6 +150,9 @@
         if (e.target.closest('[data-action="reset"]')) {
           e.stopPropagation();
           confirmReset(b);
+        } else if (e.target.closest('[data-action="toggle-excluded"]')) {
+          e.stopPropagation();
+          toggleExcluded(b);
         } else {
           selectBook(b.key);
         }
@@ -148,7 +161,7 @@
     }
     if (!filtered.length) {
       const msg = state.books.length === 0
-        ? 'cole os cookies do Kindle pra importar livros'
+        ? 'cole os cookies do Kindle ou envie um PDF pra começar'
         : 'nenhum livro nesse filtro';
       list.innerHTML = `<li style="padding:20px;text-align:center;color:var(--text-3);font-size:12px">${escapeHtml(msg)}</li>`;
     }
@@ -212,6 +225,20 @@
     renderBookList();
     switchTab('reader');
     loadReader(key);
+    closeSidebar();
+  }
+
+  function openSidebar() {
+    $('.sidebar').classList.add('open');
+    const bd = $('#sidebarBackdrop');
+    bd.hidden = false;
+    bd.classList.add('open');
+  }
+  function closeSidebar() {
+    $('.sidebar').classList.remove('open');
+    const bd = $('#sidebarBackdrop');
+    bd.classList.remove('open');
+    bd.hidden = true;
   }
 
   function statPill(label, val, mono = false) {
@@ -232,9 +259,10 @@
     $('#rBadge').className = badgeClass;
     $('#rBadge').textContent = badgeLabel;
     $('#rTitle').textContent = b.title;
-    $('#rAuthor').textContent = b.author ? `por ${b.author}` : '';
-    $('#rAuthor').hidden = !b.author;
-    $('#rAsin').textContent = `ASIN ${b.key}`;
+    const isPdf = b.source === 'pdf';
+    $('#rAuthor').textContent = (!isPdf && b.author) ? `por ${b.author}` : '';
+    $('#rAuthor').hidden = isPdf || !b.author;
+    $('#rAsin').textContent = isPdf ? `PDF · ${b.key}` : `ASIN ${b.key}`;
 
     const pages = b.state?.lastPage || 0;
     const totalChars = b.state?.totalChars || extra.size || 0;
@@ -703,6 +731,21 @@
     close.onclick = cleanup;
   }
 
+  async function toggleExcluded(book) {
+    const next = !book.excluded;
+    try {
+      await api(`/api/book/${encodeURIComponent(book.key)}/excluded`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ excluded: next })
+      });
+      toast(next ? `"${book.title}" pulado na extração em massa` : `"${book.title}" voltou pra fila`);
+      await loadStatus();
+    } catch (e) {
+      toast('Erro: ' + e.message, 'err');
+    }
+  }
+
   async function confirmReset(book) {
     confirmDialog(
       'Apagar conteúdo extraído?',
@@ -814,8 +857,84 @@
   $('#btnStart').addEventListener('click', async () => {
     try {
       const r = await api('/api/start', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
-      toast(r.kindle ? `Fila: ${r.kindle} Kindle` : 'Extração iniciada');
+      const parts = [];
+      if (r.kindle) parts.push(`${r.kindle} Kindle`);
+      if (r.pdf)    parts.push(`${r.pdf} PDF${r.pdf > 1 ? 's' : ''}`);
+      toast(parts.length ? `Fila: ${parts.join(' + ')}` : 'Extração iniciada');
     } catch (e) { toast('Erro: ' + e.message, 'err'); }
+  });
+
+  // ---- sync (Kindle library scan) ----
+  // Re-uses /api/scan-library — the same endpoint the cookies modal hits
+  // after a successful login. Here it's exposed as a standalone button so
+  // the user can pull new books without going through the modal flow.
+  // Requires cookies already configured; falls through to a toast hint if
+  // not.
+  $('#btnSync').addEventListener('click', async () => {
+    if (!state.cookies.kindle) {
+      toast('configure os cookies do Kindle primeiro', 'err');
+      return;
+    }
+    const btn = $('#btnSync');
+    const orig = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="loader"></span> sincronizando…';
+    try {
+      const r = await api('/api/scan-library', { method: 'POST' });
+      const added = r.added || 0;
+      const total = r.total || 0;
+      if (added > 0) toast(`✓ ${added} novo${added > 1 ? 's' : ''} de ${total}`);
+      else           toast(`Biblioteca em dia — ${total} livro${total === 1 ? '' : 's'}`);
+      await loadStatus();
+    } catch (e) {
+      toast('Erro: ' + e.message, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+    }
+  });
+
+  // ---- PDF upload ----
+  // The button is just a proxy that opens the (hidden) file input. The
+  // input's change handler does the actual upload + queues extraction on
+  // the server side; we just need to refresh status afterwards so the new
+  // PDF shows up in the sidebar with the right status.
+  $('#btnUploadPdf').addEventListener('click', () => {
+    $('#pdfFileInput').click();
+  });
+  $('#pdfFileInput').addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';   // reset so picking the same file twice re-fires
+    if (!file) return;
+    if (!/\.pdf$/i.test(file.name)) {
+      toast('só arquivos .pdf', 'err');
+      return;
+    }
+    const fd = new FormData();
+    fd.append('file', file);
+    const btn = $('#btnUploadPdf');
+    btn.disabled = true;
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<span class="loader"></span> enviando…';
+    try {
+      const r = await fetch('/api/upload-pdf', { method: 'POST', body: fd });
+      if (!r.ok) {
+        let err = `HTTP ${r.status}`;
+        try { const j = await r.json(); err = j.error || err; } catch {}
+        throw new Error(err);
+      }
+      const data = await r.json();
+      toast(`PDF enviado: ${data.originalName || data.file}`);
+      // The server auto-queues the upload; switch to live so the user
+      // sees the extraction kicking off, and refresh the sidebar.
+      switchTab('live');
+      await loadStatus();
+    } catch (err) {
+      toast('Erro: ' + err.message, 'err');
+    } finally {
+      btn.disabled = false;
+      btn.innerHTML = orig;
+    }
   });
 
   $('#btnStop').addEventListener('click', async () => {
@@ -849,6 +968,13 @@
   });
 
   $('#btnClearLogs').addEventListener('click', () => { $('#logs').innerHTML = ''; });
+
+  // sidebar drawer (mobile)
+  $('#btnMenu').addEventListener('click', () => {
+    if ($('.sidebar').classList.contains('open')) closeSidebar();
+    else openSidebar();
+  });
+  $('#sidebarBackdrop').addEventListener('click', closeSidebar);
 
   // ---- init ----
   loadStatus();

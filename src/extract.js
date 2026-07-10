@@ -5,6 +5,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { cleanText } = require('./clean');
 const { resolveTesseractCmd } = require('./setup-helpers');
+const { detectKindleHost } = require('./library');
 
 const TESSERACT_CMD = resolveTesseractCmd();
 
@@ -218,7 +219,10 @@ async function extractBook(context, book, settings, idx, total) {
   if (isResume) log(`  ↻ retomando da página ${startFromPage} (${fmtBytes(state.totalChars || 0)} extraídos)`);
 
   const page = await context.newPage();
-  const url = `https://read.amazon.com/?asin=${book.asin}`;
+  // Match the cookies' region — Brazilian (.com.br) cookies on the US
+  // host just bounce to /landing and the book never opens.
+  const kindleHost = (global.__KINDLE_HOST__) || 'read.amazon.com';
+  const url = `https://${kindleHost}/?asin=${book.asin}`;
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(7000);
   await page.click('body').catch(() => {});
@@ -446,8 +450,12 @@ async function main() {
   } else if (fs.existsSync(COOKIES_PATH)) {
     browser = await chromium.launch({ headless: !!config.settings.headless });
     context = await browser.newContext({ viewport: { width: 1400, height: 900 }, locale: 'pt-BR' });
-    const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8')).map(normalizeCookie);
+    const raw = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
+    const cookies = raw.map(normalizeCookie);
     await context.addCookies(cookies);
+    // Stash the resolved Kindle host so extractBook picks the right
+    // regional read.amazon domain for each book it opens.
+    global.__KINDLE_HOST__ = detectKindleHost(raw);
   } else {
     console.error('Sem sessão e sem cookies.json. Rode primeiro: npm run import-cookies');
     process.exit(1);

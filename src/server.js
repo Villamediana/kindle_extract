@@ -3,7 +3,10 @@ const path = require('path');
 const fs = require('fs');
 const { spawn, spawnSync } = require('child_process');
 const readline = require('readline');
-const { scanLibrary, mergeIntoConfig, normalizeCookie: libNormalizeCookie } = require('./library');
+const multer = require('multer');
+const { PDFParse } = require('pdf-parse');
+const { scanLibrary, mergeIntoConfig, normalizeCookie: libNormalizeCookie, detectKindleHost } = require('./library');
+const { cleanText } = require('./clean');
 const {
   platform: hostPlatform,
   loadSetupLocal,
@@ -21,15 +24,50 @@ const ROOT = path.join(__dirname, '..');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 const OUTPUT_DIR = path.join(ROOT, 'output');
 const SESSION_DIR = path.join(ROOT, 'session');
+const PDFS_DIR = path.join(ROOT, 'pdfs');
 const CONFIG_PATH = path.join(ROOT, 'config.json');
 const COOKIES_PATH = path.join(ROOT, 'cookies.json');
+// User-toggled "exclude from mass extraction" flag — keyed by book.key
+// (ASIN for Kindle, safe filename for PDF). Source-agnostic so a single
+// list works for both. Empty/missing file = nothing excluded.
+const EXCLUDED_PATH = path.join(ROOT, 'excluded.json');
 
 const PORT = process.env.PORT || 3400;
 const MAX_LOG_BUFFER = 500;
 
+if (!fs.existsSync(PDFS_DIR)) fs.mkdirSync(PDFS_DIR, { recursive: true });
+if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(PUBLIC_DIR));
+
+// PDF upload — files land in PDFS_DIR keyed by a sanitized basename; the
+// original filename is preserved in a <key>.meta.json sidecar so the UI can
+// display it instead of the safe name.
+const pdfStorage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, PDFS_DIR),
+  filename: (req, file, cb) => {
+    const stem = (file.originalname || 'arquivo').replace(/\.pdf$/i, '');
+    const safe = safeFileName(stem) || `pdf_${Date.now()}`;
+    // Avoid clobber: if a same-named PDF already sits there, append a suffix.
+    let candidate = `${safe}.pdf`;
+    let n = 2;
+    while (fs.existsSync(path.join(PDFS_DIR, candidate))) {
+      candidate = `${safe}_${n}.pdf`;
+      n++;
+    }
+    cb(null, candidate);
+  }
+});
+const pdfUpload = multer({
+  storage: pdfStorage,
+  limits: { fileSize: 500 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!/\.pdf$/i.test(file.originalname || '')) return cb(new Error('só arquivos .pdf'));
+    cb(null, true);
+  }
+});
 
 let child = null;
 let pendingQueue = [];
@@ -88,8 +126,35 @@ function broadcast(event) {
   if (logBuffer.length > MAX_LOG_BUFFER) logBuffer.shift();
 }
 
-function safeFileNameKindle(s) {
+// Must stay byte-for-byte identical to extract.js's safeFileName — the
+// extractor writes <safeName>.txt / .state.json to OUTPUT_DIR and the
+// server looks them back up here. Any extra cleanup (trimming trailing
+// underscores, collapsing runs) would silently desync the two sides: an
+// already-completed book would show up as "pending" because the lookup
+// goes to a different filename.
+function safeFileName(s) {
   return s.replace(/[^a-z0-9_\-]+/gi, '_').slice(0, 80);
+}
+// Back-compat alias for callers that used the Kindle-specific name.
+const safeFileNameKindle = safeFileName;
+
+// Repair filenames that arrived as UTF-8 bytes mis-decoded as Latin-1
+// — the classic "As CrÃ´nicas de NÃ¡rnia" pattern. Multer 2.x exposes
+// `file.originalname` decoded with `binary` (Latin-1), so a browser
+// sending a UTF-8 multipart filename ends up here as mojibake. This is
+// safe to run on already-correct strings: if every character fits in a
+// byte and the round-trip yields a valid UTF-8 sequence without
+// replacement chars, we use the fixed form; otherwise we keep the
+// original. ASCII-only strings round-trip to themselves.
+function fixMojibake(s) {
+  if (!s || typeof s !== 'string') return s;
+  if (!/[À-ÿ]/.test(s)) return s;
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) > 0xFF) return s;
+  try {
+    const fixed = Buffer.from(s, 'latin1').toString('utf8');
+    if (fixed.includes('�')) return s;
+    return fixed;
+  } catch { return s; }
 }
 
 function loadKindleConfig() {
@@ -125,14 +190,46 @@ function kindleCookiesPresent() {
   } catch { return false; }
 }
 
+function loadExcluded() {
+  if (!fs.existsSync(EXCLUDED_PATH)) return new Set();
+  try {
+    const d = JSON.parse(fs.readFileSync(EXCLUDED_PATH, 'utf-8'));
+    return new Set(Array.isArray(d.keys) ? d.keys : []);
+  } catch { return new Set(); }
+}
+
+function saveExcluded(set) {
+  fs.writeFileSync(EXCLUDED_PATH, JSON.stringify({ keys: [...set] }, null, 2));
+}
+
+// Look up the original (pre-sanitization) display name for a PDF, falling
+// back to the safe key with underscores turned into spaces if no sidecar
+// exists (e.g. the PDF was dropped into pdfs/ by hand).
+function pdfDisplayTitle(key) {
+  const metaPath = path.join(PDFS_DIR, `${key}.meta.json`);
+  if (fs.existsSync(metaPath)) {
+    try {
+      const m = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      if (m.originalName) {
+        // Belt-and-suspenders: meta sidecars written by older builds
+        // may have mojibake baked in. Repair on the way out so the UI
+        // shows the right thing without forcing the user to re-upload.
+        return fixMojibake(m.originalName).replace(/\.pdf$/i, '');
+      }
+    } catch {}
+  }
+  return key.replace(/_/g, ' ');
+}
+
 function buildBookList() {
   const out = [];
   let idx = 1;
+  const excluded = loadExcluded();
 
   const k = loadKindleConfig();
   if (k && Array.isArray(k.books)) {
     for (const b of k.books) {
-      const info = loadStateAt(safeFileNameKindle(b.title || b.asin));
+      const info = loadStateAt(safeFileName(b.title || b.asin));
       let status = 'pending';
       if (info.state && info.state.completed) status = 'completed';
       else if (info.state && info.state.lastPage > 0) status = 'partial';
@@ -148,7 +245,38 @@ function buildBookList() {
         title: b.title,
         author: b.author || '',
         ...info,
-        status
+        status,
+        excluded: excluded.has(b.asin)
+      });
+    }
+  }
+
+  // PDFs uploaded via /api/upload-pdf show up as a separate source. The
+  // key is the safe filename (without .pdf); the .txt output lands in the
+  // same OUTPUT_DIR so the reader tab works identically.
+  if (fs.existsSync(PDFS_DIR)) {
+    const files = fs.readdirSync(PDFS_DIR).filter(f => f.toLowerCase().endsWith('.pdf'));
+    files.sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    for (const f of files) {
+      const key = path.basename(f, path.extname(f));
+      const info = loadStateAt(key);
+      let status = 'pending';
+      if (info.state && info.state.completed) status = 'completed';
+      else if (info.state && info.state.lastPage > 0) status = 'partial';
+      else if (info.hasFile) status = 'partial';
+      if (runState.running && runState.current
+          && runState.current.source === 'pdf'
+          && runState.current.key === key) status = 'extracting';
+      out.push({
+        idx: idx++,
+        source: 'pdf',
+        key,
+        asin: null,
+        title: pdfDisplayTitle(key),
+        author: 'PDF',
+        ...info,
+        status,
+        excluded: excluded.has(key)
       });
     }
   }
@@ -238,6 +366,96 @@ function spawnKindle(asins, onDone) {
   });
 }
 
+// Extract text from a single PDF on disk, write to OUTPUT_DIR/<key>.txt,
+// and emit page-by-page progress events in the same shape extract.js uses
+// for Kindle books. Sequential page loop instead of streaming: pdf-parse
+// returns the whole TextResult at once, so we still finish the parse
+// before emitting per-page UI updates, but the bookkeeping (state file,
+// reader tab, status filters) stays consistent with the Kindle flow.
+async function processOnePdf(key, idx, total) {
+  const pdfPath = path.join(PDFS_DIR, `${key}.pdf`);
+  const title = pdfDisplayTitle(key);
+  const fileBase = key;
+  const fileName = `${fileBase}.txt`;
+  const txtPath = path.join(OUTPUT_DIR, fileName);
+  const statePath = path.join(OUTPUT_DIR, `${fileBase}.state.json`);
+
+  if (!fs.existsSync(pdfPath)) {
+    broadcast({ t: Date.now(), type: 'system', source: 'pdf', msg: `PDF não encontrado: ${key}.pdf` });
+    return;
+  }
+
+  broadcast({
+    t: Date.now(), type: 'book_start', source: 'pdf',
+    id: key, title, idx, total, file: fileName, startFromPage: 0
+  });
+
+  fs.writeFileSync(txtPath, '');
+  let totalChars = 0;
+  const startMs = Date.now();
+  let parser = null;
+  let lastPage = 0;
+
+  try {
+    const dataBuffer = fs.readFileSync(pdfPath);
+    parser = new PDFParse({ data: dataBuffer });
+    const result = await parser.getText();
+    const pages = Array.isArray(result.pages) ? result.pages : [];
+    const totalPages = result.total || pages.length;
+
+    for (let i = 0; i < pages.length; i++) {
+      const p = pages[i];
+      const cleaned = cleanText(p.text || '');
+      if (cleaned) {
+        fs.appendFileSync(txtPath, cleaned + '\n\n');
+        totalChars += cleaned.length + 2;
+      }
+      lastPage = p.num || (i + 1);
+      const elapsed = (Date.now() - startMs) / 1000;
+      const rate = elapsed > 0 ? (i + 1) / elapsed : 0;
+      const preview = cleaned.slice(0, 200);
+      broadcast({
+        t: Date.now(), type: 'page', source: 'pdf', id: key,
+        page: lastPage, totalChars,
+        rate: Math.round(rate * 100) / 100,
+        preview, file: fileName, total: totalPages
+      });
+    }
+
+    fs.writeFileSync(statePath, JSON.stringify({
+      completed: true, lastPage, totalChars, totalPages,
+      title, key, source: 'pdf', file: fileName,
+      finishedAt: new Date().toISOString()
+    }, null, 2));
+    broadcast({
+      t: Date.now(), type: 'book_end', source: 'pdf',
+      id: key, title, completed: true, lastPage, totalChars
+    });
+  } catch (e) {
+    fs.writeFileSync(statePath, JSON.stringify({
+      completed: false, lastPage, totalChars,
+      title, key, source: 'pdf', file: fileName,
+      abortReason: e.message || String(e)
+    }, null, 2));
+    broadcast({ t: Date.now(), type: 'stderr', source: 'pdf', msg: e.message || String(e) });
+    broadcast({
+      t: Date.now(), type: 'book_end', source: 'pdf',
+      id: key, title, completed: false, lastPage, totalChars
+    });
+  } finally {
+    try { if (parser) await parser.destroy(); } catch {}
+  }
+}
+
+async function processPdfQueue(keys, onDone) {
+  broadcast({ t: Date.now(), type: 'system', source: 'pdf', msg: `▶ Processando ${keys.length} PDF${keys.length > 1 ? 's' : ''}` });
+  for (let i = 0; i < keys.length; i++) {
+    await processOnePdf(keys[i], i + 1, keys.length);
+  }
+  broadcast({ t: Date.now(), type: 'system', source: 'pdf', msg: `Fila de PDF concluída` });
+  onDone();
+}
+
 function runNext() {
   if (pendingQueue.length === 0) {
     runState.running = false;
@@ -247,6 +465,10 @@ function runNext() {
     return;
   }
   const item = pendingQueue.shift();
+  if (item.source === 'pdf') {
+    processPdfQueue(item.keys, runNext);
+    return;
+  }
   spawnKindle(item.keys, runNext);
 }
 
@@ -260,28 +482,76 @@ app.post('/api/start', (req, res) => {
   let target = [];
 
   if (Array.isArray(body.keys) && body.keys.length > 0) {
+    // Explicit selection — honor it as-is. The user picked a specific
+    // book to extract, so they should get it even if it's flagged
+    // "excluded da extração em massa" elsewhere.
     target = all.filter(b => body.keys.some(k => k.key === b.key));
   } else if (Array.isArray(body.asins) && body.asins.length > 0) {
     target = all.filter(b => body.asins.includes(b.asin));
   } else {
-    target = all.filter(b => b.status !== 'completed');
+    // Mass extraction — drop completed books and anything the user
+    // marked excluded via the per-book toggle.
+    target = all.filter(b => b.status !== 'completed' && !b.excluded);
   }
 
   if (target.length === 0) return res.status(400).json({ error: 'nenhum livro pendente pra extrair' });
 
-  const kindleKeys = target.map(b => b.asin);
+  const kindleKeys = target.filter(b => b.source === 'kindle').map(b => b.asin);
+  const pdfKeys    = target.filter(b => b.source === 'pdf').map(b => b.key);
 
   pendingQueue = [];
-  pendingQueue.push({ source: 'kindle', keys: kindleKeys });
+  if (kindleKeys.length) pendingQueue.push({ source: 'kindle', keys: kindleKeys });
+  if (pdfKeys.length)    pendingQueue.push({ source: 'pdf',    keys: pdfKeys });
 
   runState.running = true;
   runState.startedAt = new Date().toISOString();
   runState.endedAt = null;
   runState.current = null;
-  broadcast({ t: Date.now(), type: 'system', msg: `▶ Iniciando ${kindleKeys.length} Kindle` });
+  const parts = [];
+  if (kindleKeys.length) parts.push(`${kindleKeys.length} Kindle`);
+  if (pdfKeys.length)    parts.push(`${pdfKeys.length} PDF${pdfKeys.length > 1 ? 's' : ''}`);
+  broadcast({ t: Date.now(), type: 'system', msg: `▶ Iniciando ${parts.join(' + ')}` });
   runNext();
 
-  res.json({ ok: true, kindle: kindleKeys.length });
+  res.json({ ok: true, kindle: kindleKeys.length, pdf: pdfKeys.length });
+});
+
+// PDF upload — saves the file to PDFS_DIR, writes the original-name
+// sidecar, and immediately queues it for extraction (or appends to the
+// running queue if something is already going). Multer handles the
+// multipart parsing.
+app.post('/api/upload-pdf', (req, res) => {
+  pdfUpload.single('file')(req, res, (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'arquivo não recebido' });
+
+    const fname = req.file.filename;
+    const key   = path.basename(fname, path.extname(fname));
+    const originalName = fixMojibake(req.file.originalname || fname);
+
+    // Sidecar so the UI shows the user's original filename, not the
+    // sanitized one.
+    try {
+      fs.writeFileSync(
+        path.join(PDFS_DIR, `${key}.meta.json`),
+        JSON.stringify({ originalName, uploadedAt: new Date().toISOString(), size: req.file.size }, null, 2)
+      );
+    } catch {}
+
+    pendingQueue.push({ source: 'pdf', keys: [key] });
+    broadcast({ t: Date.now(), type: 'system', source: 'pdf', msg: `▶ PDF na fila: ${originalName}` });
+
+    // Auto-start if the orchestrator is idle. If something is already
+    // running, runNext will pick this up when the current item finishes.
+    if (!runState.running) {
+      runState.running = true;
+      runState.startedAt = new Date().toISOString();
+      runState.endedAt = null;
+      runNext();
+    }
+
+    res.json({ ok: true, key, file: fname, originalName });
+  });
 });
 
 app.post('/api/stop', (req, res) => {
@@ -334,11 +604,19 @@ app.post('/api/cookies', (req, res) => {
   const invalid = raw.find(c => !c.name || c.value === undefined || !c.domain);
   if (invalid) return res.status(400).json({ error: 'cookies devem ter name, value, domain' });
 
-  const needed = ['at-main', 'sess-at-main', 'x-main', 'ubid-main', 'session-id'];
-  const found = needed.filter(n => raw.some(c => c.name === n));
+  // Amazon's regional sites use suffixed cookie names: at-main / x-main /
+  // ubid-main on .com, at-acbbr / x-acbbr / ubid-acbbr on .com.br, and
+  // similar variants for other locales. Accept any of the known shapes —
+  // detectKindleHost decides which read.amazon host to hit later.
+  const isSessionCookie = (name) => {
+    if (!name) return false;
+    if (name === 'session-id' || name === 'session-token') return true;
+    return /^(at|sess-at|x|ubid|sst|sso-state)-(main|acbbr|acbuk|acbjp|acbde|acbfr|acbit|acbes|acbca|acbau|acbin|acbnl|acbsg)$/i.test(name);
+  };
+  const found = raw.filter(c => isSessionCookie(c.name)).map(c => c.name);
   if (found.length === 0) {
     return res.status(400).json({
-      error: 'nenhum cookie de sessão Amazon encontrado (esperado pelo menos um de: ' + needed.join(', ') + ')'
+      error: 'nenhum cookie de sessão Amazon encontrado (esperado at-main/at-acbbr/session-id/etc.)'
     });
   }
 
@@ -366,23 +644,28 @@ app.post('/api/check-login', async (req, res) => {
   try {
     const raw = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
     const cookies = raw.map(normalizeCookie);
+    // Match the region the user's cookies belong to — hitting
+    // read.amazon.com with .com.br cookies just bounces to /landing and
+    // looks identical to a real auth failure.
+    const host = detectKindleHost(raw);
 
     browser = await chromium.launch({ headless: true });
     context = await browser.newContext({ viewport: { width: 1400, height: 900 }, locale: 'pt-BR' });
     await context.addCookies(cookies);
 
     const page = await context.newPage();
-    await page.goto('https://read.amazon.com', { waitUntil: 'domcontentloaded', timeout: 20000 });
+    await page.goto(`https://${host}`, { waitUntil: 'domcontentloaded', timeout: 20000 });
     await page.waitForTimeout(4000);
 
     const url = page.url();
     const title = await page.title().catch(() => '');
-    const isLogin = /signin|ap\/signin|login/i.test(url);
+    const isLogin   = /signin|ap\/signin|login/i.test(url);
+    const isLanding = /\/landing/i.test(url);
 
     let books = 0;
     try {
       books = await page.evaluate(() => {
-        const sels = ['[data-asin]', '.book', '.kindle-library-asset', '[role="article"]'];
+        const sels = ['[id^="title-"]', '[data-asin]', '.book', '.kindle-library-asset', '[role="article"]'];
         for (const sel of sels) {
           const n = document.querySelectorAll(sel).length;
           if (n > 0) return n;
@@ -394,9 +677,12 @@ app.post('/api/check-login', async (req, res) => {
     await browser.close();
 
     if (isLogin) {
-      return res.json({ ok: false, url, title, error: 'cookies não autenticaram — Amazon redirecionou pro login' });
+      return res.json({ ok: false, host, url, title, error: 'cookies não autenticaram — Amazon redirecionou pro login' });
     }
-    res.json({ ok: true, url, title, booksDetected: books });
+    if (isLanding) {
+      return res.json({ ok: false, host, url, title, error: `cookies não pertencem a ${host} (caiu na página marketing)` });
+    }
+    res.json({ ok: true, host, url, title, booksDetected: books });
   } catch (e) {
     try { if (browser) await browser.close(); } catch {}
     res.status(500).json({ error: e.message });
@@ -481,7 +767,7 @@ app.post('/api/scan-library', async (req, res) => {
 
 app.post('/api/book/:key/reset', (req, res) => {
   const key = req.params.key;
-  if (!/^[A-Za-z0-9_\-]{4,40}$/.test(key)) return res.status(400).json({ error: 'key inválida' });
+  if (!/^[A-Za-z0-9_\-]{1,80}$/.test(key)) return res.status(400).json({ error: 'key inválida' });
 
   const all = buildBookList();
   const book = all.find(b => b.key === key);
@@ -496,6 +782,47 @@ app.post('/api/book/:key/reset', (req, res) => {
   const stateFile = path.join(OUTPUT_DIR, `${fileBase}.state.json`);
   const removed = [];
   for (const f of [txtFile, stateFile]) {
+    if (fs.existsSync(f)) {
+      try { fs.unlinkSync(f); removed.push(path.basename(f)); } catch {}
+    }
+  }
+  res.json({ ok: true, removed });
+});
+
+// Toggle "skip in mass extraction" for a single book. The book stays
+// visible in the library list either way — this only affects the
+// implicit "extract all pending" path. Explicit selection (clicking
+// "Extrair só este livro" on the reader tab) ignores the flag.
+app.post('/api/book/:key/excluded', (req, res) => {
+  const key = req.params.key;
+  if (!/^[A-Za-z0-9_\-]{1,80}$/.test(key)) return res.status(400).json({ error: 'key inválida' });
+  const wantExcluded = !!(req.body && req.body.excluded);
+  const set = loadExcluded();
+  if (wantExcluded) set.add(key); else set.delete(key);
+  saveExcluded(set);
+  res.json({ ok: true, key, excluded: wantExcluded });
+});
+
+// Delete an uploaded PDF entirely — the .pdf file, its meta sidecar, and
+// any extracted output. Kindle books don't support this; the catalog is
+// owned by config.json, not the filesystem.
+app.delete('/api/pdf/:key', (req, res) => {
+  const key = req.params.key;
+  if (!/^[A-Za-z0-9_\-]{1,80}$/.test(key)) return res.status(400).json({ error: 'key inválida' });
+
+  if (runState.running && runState.current
+      && runState.current.source === 'pdf' && runState.current.key === key) {
+    return res.status(409).json({ error: 'este PDF está sendo processado agora — pare antes de apagar' });
+  }
+
+  const removed = [];
+  const targets = [
+    path.join(PDFS_DIR, `${key}.pdf`),
+    path.join(PDFS_DIR, `${key}.meta.json`),
+    path.join(OUTPUT_DIR, `${key}.txt`),
+    path.join(OUTPUT_DIR, `${key}.state.json`)
+  ];
+  for (const f of targets) {
     if (fs.existsSync(f)) {
       try { fs.unlinkSync(f); removed.push(path.basename(f)); } catch {}
     }

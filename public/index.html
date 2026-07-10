@@ -11,6 +11,11 @@
 </head>
 <body>
   <header class="topbar">
+    <button id="btnMenu" class="btn btn-icon menu-toggle" aria-label="Abrir menu" title="Biblioteca">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M3 6h18M3 12h18M3 18h18"/>
+      </svg>
+    </button>
     <div class="brand">
       <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
         <path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H19a1 1 0 0 1 1 1v15a1 1 0 0 1-1 1H5.5A2.5 2.5 0 0 1 3 17.5v-13A1.5 1.5 0 0 1 4.5 3"/>
@@ -19,7 +24,7 @@
       </svg>
       <div>
         <div class="brand-title">Kindle Extract</div>
-        <div class="brand-sub">Kindle Cloud Reader → Texto</div>
+        <div class="brand-sub">Kindle Cloud Reader · PDF → Texto</div>
       </div>
     </div>
     <div class="topbar-stats" id="topStats">
@@ -34,7 +39,7 @@
           <path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>
           <circle cx="12" cy="12" r="4"/>
         </svg>
-        Setup
+        <span class="btn-label">Setup</span>
         <span id="setupBadge" class="badge-dot" hidden></span>
       </button>
       <button id="btnCookies" class="btn" title="Configurar cookies do Kindle">
@@ -44,18 +49,37 @@
           <circle cx="14" cy="14" r=".7" fill="currentColor"/>
           <circle cx="11" cy="16.5" r=".7" fill="currentColor"/>
         </svg>
-        Cookies
+        <span class="btn-label">Cookies</span>
+      </button>
+      <button id="btnUploadPdf" class="btn" title="Enviar um PDF para extração">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <path d="M14 2v6h6"/>
+          <path d="M12 18v-6"/>
+          <path d="M9 15l3-3 3 3"/>
+        </svg>
+        <span class="btn-label">PDF</span>
+      </button>
+      <input id="pdfFileInput" type="file" accept="application/pdf,.pdf" hidden>
+      <button id="btnSync" class="btn" title="Verificar a biblioteca do Kindle por livros novos">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8">
+          <path d="M21 12a9 9 0 0 1-15.6 6.1L3 21"/>
+          <path d="M3 12a9 9 0 0 1 15.6-6.1L21 3"/>
+          <path d="M21 3v6h-6"/>
+          <path d="M3 21v-6h6"/>
+        </svg>
+        <span class="btn-label">Sync</span>
       </button>
       <button id="btnWipeAll" class="btn btn-danger-ghost" title="Apagar tudo: cookies, lista de livros, textos extraídos e sessão" hidden>
-        Apagar tudo
+        <span class="btn-label">Apagar tudo</span>
       </button>
       <button id="btnStart" class="btn btn-primary">
         <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-        Iniciar extração
+        <span class="btn-label">Iniciar extração</span>
       </button>
       <button id="btnStop" class="btn btn-danger" hidden>
         <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M6 6h12v12H6z"/></svg>
-        Parar
+        <span class="btn-label">Parar</span>
       </button>
     </div>
   </header>
@@ -131,6 +155,7 @@
   </div>
 
   <main class="layout">
+    <div id="sidebarBackdrop" class="sidebar-backdrop" hidden></div>
     <aside class="sidebar">
       <div class="sidebar-head">
         <div class="sidebar-title">Biblioteca</div>

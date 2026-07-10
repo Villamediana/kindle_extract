@@ -25,6 +25,30 @@ function normalizeCookie(c) {
   return out;
 }
 
+// Amazon's read.amazon domain is region-locked: cookies set on
+// `.amazon.com.br` only flow to `read.amazon.com.br`, and the US ones only
+// to `read.amazon.com`. Picking the wrong one redirects the user to the
+// marketing landing page even though the cookies were valid. We detect the
+// region from the cookie domains the user actually pasted.
+function detectKindleHost(cookies) {
+  const list = Array.isArray(cookies) ? cookies : [];
+  // Most specific suffix wins so ".amazon.com.br" beats ".amazon.com".
+  const hits = { 'read.amazon.com.br': 0, 'read.amazon.co.uk': 0, 'read.amazon.co.jp': 0, 'read.amazon.de': 0, 'read.amazon.com': 0 };
+  for (const c of list) {
+    const d = (c.domain || '').toLowerCase();
+    if (d.endsWith('.amazon.com.br') || d === 'amazon.com.br') hits['read.amazon.com.br']++;
+    else if (d.endsWith('.amazon.co.uk') || d === 'amazon.co.uk') hits['read.amazon.co.uk']++;
+    else if (d.endsWith('.amazon.co.jp') || d === 'amazon.co.jp') hits['read.amazon.co.jp']++;
+    else if (d.endsWith('.amazon.de') || d === 'amazon.de') hits['read.amazon.de']++;
+    else if (d.endsWith('.amazon.com') || d === 'amazon.com') hits['read.amazon.com']++;
+  }
+  let best = 'read.amazon.com', bestN = 0;
+  for (const [h, n] of Object.entries(hits)) {
+    if (n > bestN) { best = h; bestN = n; }
+  }
+  return best;
+}
+
 async function harvest(page, all) {
   const items = await page.evaluate(() => {
     const out = [];
@@ -92,7 +116,10 @@ async function scanLibrary({ headless = true, onProgress } = {}) {
   if (!fs.existsSync(COOKIES_PATH)) {
     throw new Error('cookies.json não existe');
   }
-  const cookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8')).map(normalizeCookie);
+  const rawCookies = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf-8'));
+  const cookies = rawCookies.map(normalizeCookie);
+  const host = detectKindleHost(rawCookies);
+  const libraryUrl = `https://${host}/kindle-library`;
 
   const browser = await chromium.launch({ headless });
   const context = await browser.newContext({ viewport: { width: 1400, height: 900 }, locale: 'pt-BR' });
@@ -100,12 +127,15 @@ async function scanLibrary({ headless = true, onProgress } = {}) {
   const page = await context.newPage();
 
   try {
-    onProgress?.({ phase: 'opening' });
-    await page.goto('https://read.amazon.com/kindle-library', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    onProgress?.({ phase: 'opening', host });
+    await page.goto(libraryUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(4000);
 
     if (/signin|ap\/signin/i.test(page.url())) {
-      throw new Error('cookies não autenticaram (Amazon redirecionou pro login)');
+      throw new Error(`cookies não autenticaram em ${host} (Amazon redirecionou pro login)`);
+    }
+    if (/\/landing/i.test(page.url())) {
+      throw new Error(`${host} mostrou a página marketing — cookies provavelmente não pertencem a essa região`);
     }
 
     onProgress?.({ phase: 'collecting' });
@@ -153,4 +183,4 @@ function mergeIntoConfig(scanned) {
   return { config: newConfig, total: finalBooks.length, added, scanned: scanned.length };
 }
 
-module.exports = { scanLibrary, mergeIntoConfig, normalizeCookie };
+module.exports = { scanLibrary, mergeIntoConfig, normalizeCookie, detectKindleHost };
